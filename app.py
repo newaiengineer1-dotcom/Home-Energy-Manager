@@ -50,13 +50,18 @@ COLORS = {
     "solar": "#FFDF4A", "battery": "#39D353",
 }
 
+# =============================================================
+# DEFAULT APPLIANCES - Your setup (September 2026)
+# -------------------------------------------------------------
+# - 2 x Inverter AC 1.5 Ton Waves  @ 26 degrees C, 1200W running
+# - 1 x Inverter AC 1.0 Ton        @ 26 degrees C,  900W running
+# - 1 x Inverter Refrigerator PEL  @ 24h/day,       150W average
+# =============================================================
 DEFAULT_APPLIANCES = [
-    {"name": "Air Conditioner (1.5 Ton)", "watts": 1500, "hours": 8.0, "qty": 1},
-    {"name": "Refrigerator", "watts": 200, "hours": 24.0, "qty": 1},
-    {"name": "LED Lights (set of 10)", "watts": 100, "hours": 6.0, "qty": 1},
-    {"name": "Ceiling Fan", "watts": 80, "hours": 12.0, "qty": 3},
-    {"name": "Water Heater (Geyser)", "watts": 2000, "hours": 1.0, "qty": 1},
-    {"name": "Washing Machine", "watts": 500, "hours": 1.0, "qty": 1},
+    {"name": "Inverter AC 1.5 Ton (Waves) #1", "watts": 1200, "hours": 8.0, "qty": 1},
+    {"name": "Inverter AC 1.5 Ton (Waves) #2", "watts": 1200, "hours": 8.0, "qty": 1},
+    {"name": "Inverter AC 1.0 Ton #1",         "watts": 900,  "hours": 8.0, "qty": 1},
+    {"name": "Inverter Refrigerator (PEL)",    "watts": 150,  "hours": 24.0, "qty": 1},
 ]
 
 # =============================================================
@@ -205,7 +210,7 @@ def build_snapshot(appliances, system, tariff):
     return s
 
 # =============================================================
-# AI ADVISOR (direct Groq API — no CrewAI/litellm)
+# AI ADVISOR (direct Groq API - no CrewAI/litellm)
 # =============================================================
 def run_ai_advisor(appliance_summary: str, solar_kwp: float,
                    battery_kwh: float, monthly_units: float) -> str:
@@ -597,9 +602,10 @@ elif snap.remaining > 0:
     st.markdown("""
     - Increase solar to reduce grid import - Each +1 kWp offsets ~110-150 units/month
     - Add battery capacity - Each +5 kWh shifts ~4-6 units/day from grid to solar
-    - Shift AC/geyser usage to 10 AM-3 PM (solar peak)
+    - Shift AC usage to 10 AM-3 PM (solar peak) - your 3 ACs are the biggest load
+    - Keep ACs at 26 degrees C or higher (you already are - good!)
+    - Set AC sleep timers to 6 hours overnight instead of 8
     - Switch to LED bulbs - saves 3-5 units/month
-    - Set AC to 26 degrees C - saves up to 24% AC energy
     """)
 else:
     st.markdown(
@@ -609,7 +615,7 @@ else:
         unsafe_allow_html=True,
     )
     st.markdown("""
-    - Reduce consumption immediately - Unprotected rates are 2-3x higher
+    - Reduce AC runtime immediately - 3 ACs are your dominant load
     - Add solar kWp urgently - Minimum 2 kWp additional recommended
     - Maximize battery - Store solar for night use
     - Do NOT install a second meter - LESCO crackdown active since 2026
