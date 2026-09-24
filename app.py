@@ -2,7 +2,7 @@
 Home Energy Management Dashboard
 LESCO Protected Consumer | Captive Solar (No Export) | Sep 2026
 
-High-contrast dark theme. LLM performs solar estimate + strategy + recommendations.
+High-contrast theme. UI and layout unchanged from v3.0.
 """
 import os
 import json
@@ -212,7 +212,7 @@ st.set_page_config(page_title="Home Energy Manager", page_icon="⚡",
                    layout="wide", initial_sidebar_state="expanded")
 
 # -------------------------------------------------------------
-# HIGH-CONTRAST CSS — every element styled for readability
+# HIGH-CONTRAST CSS — only this block changed from v3.0
 # -------------------------------------------------------------
 st.markdown("""
 <style>
@@ -223,7 +223,6 @@ st.markdown("""
     }
     html, body, [class*="css"] {
         color: #F0F6FC !important;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     }
     p, span, div, label, li, td, th {
         color: #F0F6FC !important;
@@ -241,12 +240,6 @@ st.markdown("""
         -webkit-text-fill-color: transparent;
         text-align: center; padding: 1rem 0;
     }
-    .sub-header {
-        color: #B0BAC5 !important;
-        text-align: center;
-        font-size: 0.95rem;
-        margin-bottom: 1rem;
-    }
 
     /* ---------- SIDEBAR ---------- */
     section[data-testid="stSidebar"] {
@@ -263,7 +256,6 @@ st.markdown("""
         border-radius: 12px;
         padding: 1rem 1.2rem;
         border: 1px solid #30363D;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.3);
     }
     div[data-testid="stMetricLabel"] > div,
     div[data-testid="stMetricLabel"] p,
@@ -297,7 +289,6 @@ st.markdown("""
         color: #F0F6FC !important;
         font-size: 0.98rem;
         line-height: 1.55;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.25);
     }
     .info-card b { color: #FFFFFF !important; }
 
@@ -308,7 +299,6 @@ st.markdown("""
         margin: 0.7rem 0;
         border-left: 5px solid #58A6FF;
         color: #F0F6FC !important;
-        box-shadow: 0 3px 10px rgba(0,0,0,0.3);
     }
     .rec-danger  { border-left-color: #F85149; }
     .rec-warning { border-left-color: #D29922; }
@@ -389,7 +379,7 @@ st.markdown("""
     }
     .stButton > button * { color: #FFFFFF !important; }
 
-    /* ---------- INPUTS / SELECTS ---------- */
+    /* ---------- INPUTS ---------- */
     input, textarea, select {
         background-color: #0D1117 !important;
         color: #F0F6FC !important;
@@ -452,7 +442,7 @@ st.markdown("""
         color: #A0AAB5 !important;
     }
 
-    /* ---------- MARKDOWN (AI output fallback) ---------- */
+    /* ---------- MARKDOWN (AI output) ---------- */
     div[data-testid="stMarkdownContainer"] p,
     div[data-testid="stMarkdownContainer"] li,
     div[data-testid="stMarkdownContainer"] span {
@@ -470,30 +460,14 @@ st.markdown("""
         padding: 2px 6px;
         border-radius: 4px;
     }
-    div[data-testid="stMarkdownContainer"] h1,
-    div[data-testid="stMarkdownContainer"] h2,
-    div[data-testid="stMarkdownContainer"] h3,
-    div[data-testid="stMarkdownContainer"] h4 {
-        color: #FFFFFF !important;
-    }
 
     /* ---------- SPINNER ---------- */
     div[data-testid="stSpinner"] * { color: #F0F6FC !important; }
 
-    /* ---------- SECTION DIVIDERS ---------- */
+    /* ---------- DIVIDERS ---------- */
     hr {
         border-color: #30363D !important;
         margin: 1.5rem 0;
-    }
-
-    /* ---------- SECTION HEADING ---------- */
-    .section-h {
-        color: #FFFFFF !important;
-        font-size: 1.35rem;
-        font-weight: 700;
-        margin: 1.5rem 0 0.75rem 0;
-        padding-bottom: 0.3rem;
-        border-bottom: 2px solid #21262D;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -591,8 +565,9 @@ avg_bill = sum(bill_list) / len(bill_list) if bill_list else 0
 # =============================================================
 st.markdown('<div class="main-header">Home Energy Manager</div>', unsafe_allow_html=True)
 st.markdown(
-    '<p class="sub-header">September 2026 · LESCO Protected Consumer · '
-    'Captive Solar (No Export) · LLM-Driven Analysis</p>',
+    "<p style='text-align:center; color:#B0BAC5;'>"
+    "September 2026 | LESCO Protected Consumer | "
+    "Captive Solar (No Export) | LLM-Driven Analysis</p>",
     unsafe_allow_html=True,
 )
 st.markdown("---")
@@ -614,7 +589,7 @@ with c4:
 # =============================================================
 # SYSTEM SUMMARY
 # =============================================================
-st.markdown('<div class="section-h">⚙️ System Configuration</div>', unsafe_allow_html=True)
+st.markdown("### ⚙️ System Configuration")
 sc1, sc2 = st.columns(2)
 with sc1:
     st.markdown(
@@ -640,8 +615,7 @@ with sc2:
 # =============================================================
 # APPLIANCE TABLE
 # =============================================================
-st.markdown('<div class="section-h">🔌 Appliance Consumption Breakdown</div>',
-            unsafe_allow_html=True)
+st.markdown("### 🔌 Appliance Consumption Breakdown")
 app_df = pd.DataFrame([{
     "Appliance": a.name,
     "Watts": a.watts,
@@ -656,16 +630,14 @@ st.dataframe(app_df, hide_index=True, use_container_width=True)
 # =============================================================
 # HISTORY
 # =============================================================
-st.markdown('<div class="section-h">📊 14-Month History (Aug 2025 → Sep 2026)</div>',
-            unsafe_allow_html=True)
+st.markdown("### 📊 14-Month History (Aug 2025 → Sep 2026)")
 st.dataframe(st.session_state.hist_df, hide_index=True, use_container_width=True)
 
 # =============================================================
 # LLM ANALYSIS
 # =============================================================
 st.markdown("---")
-st.markdown('<div class="section-h">🤖 LLM Analysis (Groq · gpt-oss-120b)</div>',
-            unsafe_allow_html=True)
+st.markdown("### 🤖 LLM Analysis (Groq · gpt-oss-120b)")
 st.caption(
     "The LLM estimates solar PV generation from real Lahore irradiance and "
     "system loss factors, then produces strategy + 4 focus recommendations."
@@ -690,8 +662,7 @@ else:
     # ---------- SOLAR ESTIMATE ----------
     se = analysis.get("solar_estimate", {})
     if se:
-        st.markdown('<div class="section-h">☀️ Solar PV Generation Estimate</div>',
-                    unsafe_allow_html=True)
+        st.markdown("#### ☀️ Solar PV Generation Estimate")
         e1, e2, e3 = st.columns(3)
         with e1:
             st.metric("Daily", "{:.1f} kWh".format(se.get("daily_kwh", 0)))
@@ -710,8 +681,7 @@ else:
     # ---------- STRATEGY ----------
     strategy = analysis.get("solar_usage_strategy", [])
     if strategy:
-        st.markdown('<div class="section-h">💡 Solar PV Usage Strategy</div>',
-                    unsafe_allow_html=True)
+        st.markdown("#### 💡 Solar PV Usage Strategy")
         for i, tip in enumerate(strategy, 1):
             st.markdown(
                 '<div class="info-card">'
@@ -723,8 +693,7 @@ else:
     # ---------- RECOMMENDATIONS ----------
     recs = analysis.get("recommendations", {})
     if recs:
-        st.markdown('<div class="section-h">🎯 Top Recommendations</div>',
-                    unsafe_allow_html=True)
+        st.markdown("#### 🎯 Top Recommendations")
 
         inc_solar = recs.get("increase_solar", {})
         if inc_solar:
@@ -793,7 +762,7 @@ else:
     # ---------- SUMMARY ----------
     summary = analysis.get("summary")
     if summary:
-        st.markdown('<div class="section-h">📝 Summary</div>', unsafe_allow_html=True)
+        st.markdown("#### 📝 Summary")
         st.success(summary)
 
 # =============================================================
@@ -814,7 +783,7 @@ st.warning(
 st.markdown("---")
 st.markdown(
     '<p style="text-align:center; color:#A0AAB5; font-size:0.8rem;">'
-    'Home Energy Manager v3.1 | Captive Solar (No Export) | '
+    'Home Energy Manager v3.0 | Captive Solar (No Export) | '
     'LLM Analysis | Groq · openai/gpt-oss-120b'
     '</p>',
     unsafe_allow_html=True,
