@@ -2,8 +2,9 @@
 Home Energy Management Dashboard
 LESCO Protected Consumer Optimizer - September 2026
 
-Single-file app: dashboard + auto-calibrated tariff + direct Groq AI.
-Battery is charged ONLY by solar surplus - NEVER by LESCO grid.
+Single-file app with fully editable appliances (supports sessions/week),
+auto-calibrated tariff, and direct Groq AI.
+Battery charges ONLY from solar surplus - never from LESCO grid.
 """
 import os
 import requests
@@ -13,7 +14,7 @@ import plotly.express as px
 from dataclasses import dataclass, field
 
 # =============================================================
-# SECRETS BRIDGE: st.secrets -> os.environ
+# SECRETS BRIDGE
 # =============================================================
 try:
     for _k in ("GROQ_API_KEY",):
@@ -32,9 +33,9 @@ DEFAULT_SOLAR_KWP = 5.0
 DEFAULT_BATTERY_KWH = 10.0
 
 LAHORE_PEAK_SUN_HOURS = 5.2
-DAY_LOAD_RATIO = 0.60           # 60% of daily load occurs during solar hours
-BATTERY_EFFICIENCY = 0.85       # round-trip efficiency (LiFePO4 typical)
-EXPORT_RATE = 11.0              # PKR/unit - Net Billing 2026
+DAY_LOAD_RATIO = 0.60
+BATTERY_EFFICIENCY = 0.85
+EXPORT_RATE = 11.0
 
 GROQ_MODEL = "openai/gpt-oss-120b"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -51,17 +52,42 @@ COLORS = {
 }
 
 # =============================================================
-# DEFAULT APPLIANCES - Your setup (September 2026)
+# DEFAULT APPLIANCES - Your setup (editable in sidebar)
 # -------------------------------------------------------------
-# - 2 x Inverter AC 1.5 Ton Waves @ 26 degrees C (1200W running)
-# - 1 x Inverter AC 1.0 Ton       @ 26 degrees C (900W running)
-# - 1 x Inverter Refrigerator PEL (150W average, 24h/day)
-# =============================================================
+# Format: name, watts, hours (per session), sessions_per_week, qty
+# -------------------------------------------------------------
 DEFAULT_APPLIANCES = [
-    {"name": "Inverter AC 1.5 Ton (Waves) #1", "watts": 1200, "hours": 8.0, "qty": 1},
-    {"name": "Inverter AC 1.5 Ton (Waves) #2", "watts": 1200, "hours": 8.0, "qty": 1},
-    {"name": "Inverter AC 1.0 Ton #1",         "watts": 900,  "hours": 8.0, "qty": 1},
-    {"name": "Inverter Refrigerator (PEL)",    "watts": 150,  "hours": 24.0, "qty": 1},
+    # --- Inverter ACs (running watts at 26 deg C, not peak rated) ---
+    {"name": "Inverter AC 1.5T Waves (2x/week)",
+     "watts": 500, "hours": 6.0, "sessions_per_week": 2.0, "qty": 1},
+    {"name": "Inverter AC 1.5T Waves (daily 16h)",
+     "watts": 500, "hours": 16.0, "sessions_per_week": 7.0, "qty": 1},
+    {"name": "Inverter AC 1.0T (daily 16h)",
+     "watts": 350, "hours": 16.0, "sessions_per_week": 7.0, "qty": 1},
+
+    # --- Kitchen ---
+    {"name": "Microwave Oven",
+     "watts": 1200, "hours": 0.25, "sessions_per_week": 7.0, "qty": 1},
+
+    # --- Laundry ---
+    {"name": "Washing Machine (weekly)",
+     "watts": 500, "hours": 4.0, "sessions_per_week": 1.0, "qty": 1},
+
+    # --- Utility ---
+    {"name": "Submersible Pump",
+     "watts": 750, "hours": 2.0, "sessions_per_week": 7.0, "qty": 1},
+    {"name": "Machine 3kW (2x/week)",
+     "watts": 3000, "hours": 5.0, "sessions_per_week": 2.0, "qty": 1},
+    {"name": "RO 1.5kW (2x/week)",
+     "watts": 1500, "hours": 5.0, "sessions_per_week": 2.0, "qty": 1},
+    {"name": "Philips Iron (weekly)",
+     "watts": 1500, "hours": 3.0, "sessions_per_week": 1.0, "qty": 1},
+
+    # --- Lighting & fans ---
+    {"name": "Ceiling Fan (80W)",
+     "watts": 80, "hours": 12.0, "sessions_per_week": 7.0, "qty": 6},
+    {"name": "LED Light 12W",
+     "watts": 12, "hours": 12.0, "sessions_per_week": 7.0, "qty": 30},
 ]
 
 # =============================================================
@@ -71,16 +97,21 @@ DEFAULT_APPLIANCES = [
 class Appliance:
     name: str
     watts: float
-    hours: float
+    hours: float                 # hours per session
+    sessions_per_week: float = 7.0
     qty: int = 1
 
     @property
+    def weekly_kwh(self) -> float:
+        return (self.watts * self.hours * self.sessions_per_week * self.qty) / 1000
+
+    @property
     def daily_kwh(self) -> float:
-        return (self.watts * self.hours * self.qty) / 1000
+        return self.weekly_kwh / 7.0
 
     @property
     def monthly_kwh(self) -> float:
-        return self.daily_kwh * 30
+        return self.daily_kwh * 30.0
 
 
 @dataclass
@@ -121,21 +152,16 @@ class Snapshot:
     appliances: list
     system: SystemConfig
     tariff: Tariff
-    # Load
     total_daily_kwh: float = 0.0
     total_monthly_kwh: float = 0.0
-    # Solar
     solar_daily_kwh: float = 0.0
     solar_monthly_kwh: float = 0.0
-    solar_direct_monthly: float = 0.0        # consumed directly during day
-    solar_to_battery_monthly: float = 0.0    # charged into battery
-    solar_export_monthly: float = 0.0        # exported to grid
+    solar_direct_monthly: float = 0.0
+    solar_to_battery_monthly: float = 0.0
+    solar_export_monthly: float = 0.0
     export_credit: float = 0.0
-    # Battery
-    battery_discharge_monthly: float = 0.0   # usable output to home
-    # Grid
-    grid_import: float = 0.0                 # final billable units
-    # Status
+    battery_discharge_monthly: float = 0.0
+    grid_import: float = 0.0
     is_protected: bool = False
     remaining: float = 0.0
     bill: dict = field(default_factory=dict)
@@ -196,71 +222,52 @@ def calibrate_tariff(kwh_csv: str, bill_csv: str) -> Tariff:
 
 # =============================================================
 # ENERGY COMPUTATION
-# -------------------------------------------------------------
-# Battery is charged ONLY from solar surplus (never from grid).
-#
-# Daily flow:
-#   1. Solar covers day-load first (solar_direct)
-#   2. Remaining solar surplus charges battery (capped by battery kWh)
-#   3. Excess solar beyond battery capacity is exported
-#   4. Battery discharges to cover night-load (after round-trip losses)
-#   5. Grid covers whatever solar-direct + battery cannot
 # =============================================================
 def build_snapshot(appliances, system, tariff):
     s = Snapshot(appliances=appliances, system=system, tariff=tariff)
 
-    # ---- Load ----
     s.total_daily_kwh = sum(a.daily_kwh for a in appliances)
-    s.total_monthly_kwh = s.total_daily_kwh * 30
+    s.total_monthly_kwh = s.total_daily_kwh * 30.0
 
-    # ---- Daily solar ----
     s.solar_daily_kwh = system.solar_kwp * LAHORE_PEAK_SUN_HOURS
-    s.solar_monthly_kwh = s.solar_daily_kwh * 30
+    s.solar_monthly_kwh = s.solar_daily_kwh * 30.0
 
-    # ---- Split load into day/night portions ----
     day_load = s.total_daily_kwh * DAY_LOAD_RATIO
     night_load = s.total_daily_kwh * (1.0 - DAY_LOAD_RATIO)
 
-    # ---- 1. Solar used directly during day ----
+    # 1. Solar -> direct day load
     solar_direct = min(s.solar_daily_kwh, day_load)
 
-    # ---- 2. Solar surplus available for battery ----
+    # 2. Solar surplus -> battery (capped by battery kWh/day)
     solar_surplus = max(0.0, s.solar_daily_kwh - solar_direct)
-
-    # Battery can only absorb up to its rated capacity per day
     battery_charge = min(solar_surplus, system.battery_kwh)
 
-    # ---- 3. Surplus beyond battery goes to export ----
+    # 3. Remaining surplus -> export
     solar_export = solar_surplus - battery_charge
 
-    # ---- 4. Battery usable output after round-trip losses ----
+    # 4. Battery -> night load (after round-trip losses)
     battery_usable = battery_charge * BATTERY_EFFICIENCY
     battery_discharge = min(battery_usable, night_load)
 
-    # ---- 5. Grid covers the rest ----
+    # 5. Grid covers rest
     grid_daily = max(0.0, s.total_daily_kwh - solar_direct - battery_discharge)
 
-    # ---- Monthly aggregates ----
-    s.solar_direct_monthly = solar_direct * 30
-    s.solar_to_battery_monthly = battery_charge * 30
-    s.solar_export_monthly = solar_export * 30
+    s.solar_direct_monthly = solar_direct * 30.0
+    s.solar_to_battery_monthly = battery_charge * 30.0
+    s.solar_export_monthly = solar_export * 30.0
     s.export_credit = s.solar_export_monthly * EXPORT_RATE
-    s.battery_discharge_monthly = battery_discharge * 30
-    s.grid_import = grid_daily * 30
+    s.battery_discharge_monthly = battery_discharge * 30.0
+    s.grid_import = grid_daily * 30.0
 
-    # ---- Protected status ----
     s.is_protected = s.grid_import <= tariff.protected_limit
     s.remaining = tariff.protected_limit - s.grid_import
-
-    # ---- Bill ----
     s.bill = tariff.bill_for(s.grid_import)
     return s
 
 # =============================================================
-# AI ADVISOR (direct Groq API)
+# AI ADVISOR
 # =============================================================
-def run_ai_advisor(appliance_summary: str, solar_kwp: float,
-                   battery_kwh: float, monthly_units: float) -> str:
+def run_ai_advisor(appliance_summary, solar_kwp, battery_kwh, monthly_units):
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
         return ("AI advisor is disabled. Add GROQ_API_KEY to your "
@@ -387,56 +394,87 @@ if "ai_result" not in st.session_state:
 # =============================================================
 with st.sidebar:
     st.markdown("## Appliance Manager")
+    st.caption("All fields are editable. Changes recalculate instantly.")
     st.markdown("---")
 
     with st.expander("Add New Appliance", expanded=False):
         new_name = st.text_input("Appliance Name", key="new_name")
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns(2)
         new_w = c1.number_input("Watts", min_value=1, max_value=10000,
                                 value=100, step=10, key="new_w")
-        new_h = c2.number_input("Hours/Day", min_value=0.1, max_value=24.0,
-                                value=2.0, step=0.5, key="new_h")
-        new_q = c3.number_input("Qty", min_value=1, max_value=20,
+        new_h = c2.number_input("Hours per session", min_value=0.05,
+                                max_value=24.0, value=1.0, step=0.25,
+                                key="new_h")
+        c3, c4 = st.columns(2)
+        new_spw = c3.number_input("Sessions per week", min_value=0.5,
+                                  max_value=14.0, value=7.0, step=0.5,
+                                  key="new_spw")
+        new_q = c4.number_input("Quantity", min_value=1, max_value=200,
                                 value=1, step=1, key="new_q")
         if st.button("Add Appliance", use_container_width=True) and new_name:
             st.session_state.appliances.append({
                 "name": new_name,
                 "watts": int(new_w),
                 "hours": float(new_h),
+                "sessions_per_week": float(new_spw),
                 "qty": int(new_q),
             })
             st.rerun()
 
     st.markdown("### Current Appliances")
     for i, app in enumerate(st.session_state.appliances):
-        label = "{} - {}W x {}".format(app["name"], app["watts"], app["qty"])
+        # Ensure new key exists for old session state
+        if "sessions_per_week" not in app:
+            app["sessions_per_week"] = 7.0
+
+        label = "{} — {}W x{}".format(app["name"], int(app["watts"]), int(app["qty"]))
         with st.expander(label, expanded=False):
-            app["watts"] = st.number_input(
+            app["name"] = st.text_input("Name", value=app["name"],
+                                        key="n_{}".format(i))
+            c1, c2 = st.columns(2)
+            app["watts"] = c1.number_input(
                 "Watts", min_value=1, max_value=10000,
                 value=int(app["watts"]), step=10, key="w_{}".format(i),
             )
-            app["hours"] = st.number_input(
-                "Hours/Day", min_value=0.1, max_value=24.0,
-                value=float(app["hours"]), step=0.5, key="h_{}".format(i),
+            app["hours"] = c2.number_input(
+                "Hours per session", min_value=0.05, max_value=24.0,
+                value=float(app["hours"]), step=0.25, key="h_{}".format(i),
             )
-            app["qty"] = st.number_input(
-                "Quantity", min_value=1, max_value=20,
+            c3, c4 = st.columns(2)
+            app["sessions_per_week"] = c3.number_input(
+                "Sessions per week", min_value=0.5, max_value=14.0,
+                value=float(app["sessions_per_week"]), step=0.5,
+                key="spw_{}".format(i),
+            )
+            app["qty"] = c4.number_input(
+                "Quantity", min_value=1, max_value=200,
                 value=int(app["qty"]), step=1, key="q_{}".format(i),
             )
+
+            # Live preview of monthly kWh for this appliance
+            _tmp = Appliance(
+                name=app["name"], watts=app["watts"], hours=app["hours"],
+                sessions_per_week=app["sessions_per_week"], qty=app["qty"],
+            )
+            st.caption(
+                "daily: **{:.2f}** kWh | weekly: **{:.2f}** kWh | "
+                "monthly: **{:.1f}** kWh".format(
+                    _tmp.daily_kwh, _tmp.weekly_kwh, _tmp.monthly_kwh
+                )
+            )
+
             if st.button("Remove", key="del_{}".format(i)):
                 st.session_state.appliances.pop(i)
                 st.rerun()
 
     st.markdown("---")
     st.markdown("## Solar & Battery")
-
     st.markdown(
         '<div class="battery-note">'
         '🔋 <b>Battery is charged ONLY from solar surplus</b> — never from LESCO grid.'
         '</div>',
         unsafe_allow_html=True,
     )
-
     st.session_state.solar_kwp = st.slider(
         "Solar PV System (kWp)", 0.0, 25.0, st.session_state.solar_kwp, 0.5,
     )
@@ -466,7 +504,12 @@ with st.sidebar:
 # =============================================================
 # BUILD SNAPSHOT
 # =============================================================
-appliances = [Appliance(**a) for a in st.session_state.appliances]
+appliances = []
+for a in st.session_state.appliances:
+    if "sessions_per_week" not in a:
+        a["sessions_per_week"] = 7.0
+    appliances.append(Appliance(**a))
+
 system = SystemConfig(
     solar_kwp=st.session_state.solar_kwp,
     battery_kwh=st.session_state.battery_kwh,
@@ -521,6 +564,18 @@ with c4:
               delta="charges only from solar")
 
 # =============================================================
+# TOTAL LOAD SUMMARY
+# =============================================================
+st.markdown("### Total Household Load")
+lc1, lc2, lc3 = st.columns(3)
+with lc1:
+    st.metric("Daily Consumption", "{:.2f} kWh".format(snap.total_daily_kwh))
+with lc2:
+    st.metric("Monthly Consumption", "{:.1f} kWh".format(snap.total_monthly_kwh))
+with lc3:
+    st.metric("Monthly Grid Import", "{:.1f} kWh".format(snap.grid_import))
+
+# =============================================================
 # THRESHOLD GAUGE
 # =============================================================
 st.markdown("### Protected Status Threshold (<={:.0f} units)".format(tariff.protected_limit))
@@ -561,10 +616,10 @@ with col_i:
         st.error("EXCEEDED by {:.0f} units".format(abs(snap.remaining)))
 
 # =============================================================
-# SANKEY - energy flow (battery charged only from solar)
+# SANKEY
 # =============================================================
 st.markdown("### Energy Flow")
-st.caption("Battery receives charge ONLY from solar surplus - no grid-to-battery path.")
+st.caption("Battery receives charge ONLY from solar surplus — no grid-to-battery path.")
 
 fig_s = go.Figure(go.Sankey(
     node=dict(
@@ -600,14 +655,14 @@ st.plotly_chart(fig_s, use_container_width=True)
 c_left, c_right = st.columns(2)
 
 with c_left:
-    st.markdown("### Appliance Breakdown")
+    st.markdown("### Appliance Breakdown (Monthly kWh)")
     fig_d = go.Figure(go.Pie(
         labels=[a.name for a in snap.appliances],
         values=[a.monthly_kwh for a in snap.appliances],
         hole=0.55, marker=dict(colors=px.colors.qualitative.Bold),
         textinfo="label+percent", textfont=dict(color=COLORS["text"], size=11),
     ))
-    fig_d.update_layout(height=350, paper_bgcolor="rgba(0,0,0,0)",
+    fig_d.update_layout(height=400, paper_bgcolor="rgba(0,0,0,0)",
                         font={"color": COLORS["text"]}, showlegend=False,
                         margin=dict(l=20, r=20, t=30, b=20))
     st.plotly_chart(fig_d, use_container_width=True)
@@ -641,7 +696,7 @@ with c_right:
                         line_color=COLORS["danger"],
                         annotation_text="Protected Limit ({:.0f})".format(tariff.protected_limit))
         fig_t.update_layout(
-            height=350, paper_bgcolor="rgba(0,0,0,0)",
+            height=400, paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)", font={"color": COLORS["text"]},
             xaxis=dict(gridcolor="#21262D"),
             yaxis=dict(gridcolor="#21262D", title="kWh"),
@@ -653,6 +708,25 @@ with c_right:
         st.plotly_chart(fig_t, use_container_width=True)
     else:
         st.info("Enter previous-year monthly kWh in the sidebar to see trends.")
+
+# =============================================================
+# APPLIANCE DETAIL TABLE (editable confirmation)
+# =============================================================
+st.markdown("---")
+st.markdown("### Appliance Detail Table")
+table_rows = []
+for a in snap.appliances:
+    table_rows.append({
+        "Appliance": a.name,
+        "Watts": int(a.watts),
+        "Hrs/Session": a.hours,
+        "Sessions/Wk": a.sessions_per_week,
+        "Qty": a.qty,
+        "kWh/day": round(a.daily_kwh, 2),
+        "kWh/week": round(a.weekly_kwh, 2),
+        "kWh/month": round(a.monthly_kwh, 1),
+    })
+st.dataframe(table_rows, use_container_width=True, hide_index=True)
 
 # =============================================================
 # ACTION CARDS
@@ -677,10 +751,10 @@ elif snap.remaining > 0:
     )
     st.markdown("""
     - Increase solar kWp - Each +1 kWp offsets ~110-150 units/month
-    - Increase battery kWh - Each +5 kWh absorbs ~4-6 more surplus units/day
-    - Shift AC usage to 10 AM-3 PM (solar peak) - 3 ACs are your dominant load
-    - Keep ACs at 26 degrees C or higher (you already are - good!)
-    - Set AC sleep timers to 6 hours overnight instead of 8
+    - Increase battery kWh - absorbs more solar surplus (charged only from solar)
+    - Shift AC usage to 10 AM-3 PM (solar peak)
+    - Set ACs to 26 degrees C or higher (you already are - good!)
+    - Reduce AC runtime on the 16-hour units
     """)
 else:
     st.markdown(
@@ -690,7 +764,7 @@ else:
         unsafe_allow_html=True,
     )
     st.markdown("""
-    - Reduce AC runtime immediately - 3 ACs are your dominant load
+    - Reduce AC runtime immediately - ACs are your dominant load
     - Add solar kWp urgently - Minimum 2 kWp additional recommended
     - Increase battery - absorbs more solar surplus (never charged from grid)
     - Do NOT install a second meter - LESCO crackdown active since 2026
@@ -750,7 +824,9 @@ st.markdown("### AI Energy Advisor (Groq / openai/gpt-oss-120b)")
 
 if st.button("Run AI Analysis", use_container_width=True):
     summary = ", ".join(
-        "{} ({}W x {} x {}h)".format(a.name, a.watts, a.qty, a.hours)
+        "{} ({}W x {}h x {}/wk x {})".format(
+            a.name, int(a.watts), a.hours, a.sessions_per_week, a.qty
+        )
         for a in snap.appliances
     )
     with st.spinner("Asking Groq..."):
@@ -769,8 +845,9 @@ if st.session_state.ai_result:
 st.markdown("---")
 st.markdown(
     "<p style='text-align:center; color:#8B949E; font-size:0.8rem;'>"
-    "Home Energy Manager v1.3 | Solar-only battery charging | "
-    "Auto-calibrated tariff | Direct Groq API | Streamlit + Plotly"
+    "Home Energy Manager v1.4 | Fully editable appliances | "
+    "Solar-only battery charging | Auto-calibrated tariff | "
+    "Direct Groq API | Streamlit + Plotly"
     "</p>",
     unsafe_allow_html=True,
 )
