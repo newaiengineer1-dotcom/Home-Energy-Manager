@@ -4,6 +4,7 @@ LESCO Protected Consumer | Captive Solar (No Export) | Sep 2026
 
 Data window: Oct 2025 -> Sep 2026 (12 months)
 Modern graphics. High-contrast theme.
+Solar estimates use CONSERVATIVE AVERAGE values (not peak).
 """
 import os
 import json
@@ -33,7 +34,6 @@ PROTECTED_LIMIT = 200.0
 GROQ_MODEL = "openai/gpt-oss-120b"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# Data window: Oct 2025 -> Sep 2026 (12 months)
 MONTH_SEQ = [
     "Oct-25", "Nov-25", "Dec-25",
     "Jan-26", "Feb-26", "Mar-26",
@@ -55,6 +55,13 @@ COLORS = {
     "battery":"#39D353",
     "grid":   "#58A6FF",
 }
+
+# =============================================================
+# CONSERVATIVE SOLAR CONSTANTS — used in prompts and formula
+# =============================================================
+LAHORE_AVG_PSH = 4.8        # annual average peak sun hours (not summer peak)
+PV_SYSTEM_LOSS = 0.20       # 20% system losses (inverter, wiring, soiling)
+DAYS_PER_MONTH = 30
 
 DEFAULT_APPLIANCES = [
     {"name": "Inverter AC 1.5T @26C (2x/week, 6h)", "watts": 550,  "hours": 6.0,  "days_per_week": 2, "qty": 1},
@@ -128,6 +135,21 @@ def _fmt_history_table(df):
     return "\n".join(lines) if has else "(no history provided)"
 
 
+def formula_solar_estimate(kwp):
+    """
+    Deterministic, conservative average solar estimate for Lahore.
+    Used as ground truth passed to LLM. Ensures consistent, moderate output.
+    """
+    daily = kwp * LAHORE_AVG_PSH * (1 - PV_SYSTEM_LOSS)
+    monthly = daily * DAYS_PER_MONTH
+    annual = monthly * 12
+    return {
+        "daily_kwh": round(daily, 1),
+        "monthly_kwh": round(monthly, 0),
+        "annual_kwh": round(annual, 0),
+    }
+
+
 # =============================================================
 # MODERN CHART BUILDERS
 # =============================================================
@@ -165,41 +187,28 @@ def _base_layout(height=380, title=None):
 
 
 def chart_gauge(value, limit):
-    """Modern gauge with gradient-style steps and clear threshold."""
     gauge_max = max(300, limit * 1.5)
     fig = go.Figure(go.Indicator(
         mode="gauge+number+delta",
         value=value,
-        number={
-            "suffix": " units",
-            "font": {"size": 44, "color": COLORS["primary"], "family": "-apple-system"},
-        },
-        delta={
-            "reference": limit,
-            "increasing": {"color": COLORS["danger"]},
-            "decreasing": {"color": COLORS["success"]},
-            "font": {"size": 16},
-        },
+        number={"suffix": " units",
+                "font": {"size": 44, "color": COLORS["primary"]}},
+        delta={"reference": limit,
+               "increasing": {"color": COLORS["danger"]},
+               "decreasing": {"color": COLORS["success"]},
+               "font": {"size": 16}},
         gauge={
-            "axis": {
-                "range": [0, gauge_max],
-                "tickcolor": COLORS["muted"],
-                "tickfont": {"size": 10, "color": COLORS["muted"]},
-                "tickwidth": 1,
-            },
+            "axis": {"range": [0, gauge_max], "tickcolor": COLORS["muted"],
+                     "tickfont": {"size": 10, "color": COLORS["muted"]}},
             "bar": {"color": COLORS["primary"], "thickness": 0.28},
-            "bgcolor": "rgba(0,0,0,0)",
-            "borderwidth": 0,
+            "bgcolor": "rgba(0,0,0,0)", "borderwidth": 0,
             "steps": [
-                {"range": [0, limit * 0.75],        "color": "rgba(63,185,80,0.18)"},
-                {"range": [limit * 0.75, limit],    "color": "rgba(210,153,34,0.22)"},
-                {"range": [limit, gauge_max],       "color": "rgba(248,81,73,0.22)"},
+                {"range": [0, limit * 0.75],     "color": "rgba(63,185,80,0.18)"},
+                {"range": [limit * 0.75, limit], "color": "rgba(210,153,34,0.22)"},
+                {"range": [limit, gauge_max],    "color": "rgba(248,81,73,0.22)"},
             ],
-            "threshold": {
-                "line": {"color": COLORS["danger"], "width": 3},
-                "thickness": 0.85,
-                "value": limit,
-            },
+            "threshold": {"line": {"color": COLORS["danger"], "width": 3},
+                          "thickness": 0.85, "value": limit},
         },
     ))
     fig.update_layout(**_base_layout(height=290))
@@ -207,13 +216,11 @@ def chart_gauge(value, limit):
 
 
 def chart_monthly_stacked(history_df):
-    """Modern stacked bar: Solar Used vs LESCO Import per month."""
     df = history_df.copy()
     df["solar_used"] = pd.to_numeric(df.get("Solar Used (kWh)"), errors="coerce")
     df["lesco"] = pd.to_numeric(df.get("LESCO Import (kWh)"), errors="coerce")
     df["cons"] = pd.to_numeric(df.get("Consumption (kWh)"), errors="coerce")
 
-    # Fallback: if user only entered consumption, split visually
     if df["solar_used"].isna().all() and df["lesco"].isna().all():
         df["lesco"] = df["cons"]
         df["solar_used"] = 0
@@ -221,21 +228,13 @@ def chart_monthly_stacked(history_df):
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=df["Month"], y=df["solar_used"],
-        name="Solar Used",
-        marker=dict(
-            color=COLORS["solar"],
-            line=dict(color="rgba(255,223,74,0.9)", width=0),
-        ),
+        x=df["Month"], y=df["solar_used"], name="Solar Used",
+        marker=dict(color=COLORS["solar"]),
         hovertemplate="<b>%{x}</b><br>Solar Used: %{y:.0f} kWh<extra></extra>",
     ))
     fig.add_trace(go.Bar(
-        x=df["Month"], y=df["lesco"],
-        name="LESCO Import",
-        marker=dict(
-            color=COLORS["primary"],
-            line=dict(color="rgba(88,166,255,0.9)", width=0),
-        ),
+        x=df["Month"], y=df["lesco"], name="LESCO Import",
+        marker=dict(color=COLORS["primary"]),
         hovertemplate="<b>%{x}</b><br>LESCO Import: %{y:.0f} kWh<extra></extra>",
     ))
     fig.add_hline(
@@ -250,17 +249,14 @@ def chart_monthly_stacked(history_df):
     layout["bargap"] = 0.35
     layout["xaxis"] = _modern_axis_style()
     layout["yaxis"] = dict(**_modern_axis_style(), title="kWh")
-    layout["legend"] = dict(
-        orientation="h", y=1.12, x=0,
-        bgcolor="rgba(0,0,0,0)",
-        font=dict(color=COLORS["text"], size=11),
-    )
+    layout["legend"] = dict(orientation="h", y=1.12, x=0,
+                            bgcolor="rgba(0,0,0,0)",
+                            font=dict(color=COLORS["text"], size=11))
     fig.update_layout(**layout)
     return fig
 
 
 def chart_solar_utilization(history_df):
-    """Modern grouped bar: Generated vs Used."""
     df = history_df.copy()
     df["gen"] = pd.to_numeric(df.get("Solar Gen (kWh)"), errors="coerce")
     df["used"] = pd.to_numeric(df.get("Solar Used (kWh)"), errors="coerce")
@@ -277,8 +273,7 @@ def chart_solar_utilization(history_df):
     ))
     fig.add_trace(go.Bar(
         x=df["Month"], y=df["used"], name="Used On-site",
-        marker=dict(color=COLORS["success"],
-                    line=dict(color="rgba(63,185,80,0.9)", width=0)),
+        marker=dict(color=COLORS["success"]),
         hovertemplate="<b>%{x}</b><br>Used: %{y:.0f} kWh<extra></extra>",
     ))
     layout = _base_layout(height=340, title="Solar Generation vs Utilization")
@@ -287,17 +282,14 @@ def chart_solar_utilization(history_df):
     layout["bargroupgap"] = 0.1
     layout["xaxis"] = _modern_axis_style()
     layout["yaxis"] = dict(**_modern_axis_style(), title="kWh")
-    layout["legend"] = dict(
-        orientation="h", y=1.12, x=0,
-        bgcolor="rgba(0,0,0,0)",
-        font=dict(color=COLORS["text"], size=11),
-    )
+    layout["legend"] = dict(orientation="h", y=1.12, x=0,
+                            bgcolor="rgba(0,0,0,0)",
+                            font=dict(color=COLORS["text"], size=11))
     fig.update_layout(**layout)
     return fig
 
 
 def chart_bill_trend(history_df):
-    """Modern line chart: Bill (PKR) with area fill."""
     df = history_df.copy()
     df["bill"] = pd.to_numeric(df.get("Bill (PKR)"), errors="coerce")
     df = df.dropna(subset=["bill"])
@@ -306,14 +298,12 @@ def chart_bill_trend(history_df):
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=df["Month"], y=df["bill"],
-        mode="lines+markers",
-        name="Bill",
-        line=dict(color=COLORS["warning"], width=3, shape="spline", smoothing=0.9),
+        x=df["Month"], y=df["bill"], mode="lines+markers", name="Bill",
+        line=dict(color=COLORS["warning"], width=3,
+                  shape="spline", smoothing=0.9),
         marker=dict(size=9, color=COLORS["warning"],
                     line=dict(color=COLORS["text"], width=1.5)),
-        fill="tozeroy",
-        fillcolor="rgba(210,153,34,0.15)",
+        fill="tozeroy", fillcolor="rgba(210,153,34,0.15)",
         hovertemplate="<b>%{x}</b><br>Bill: PKR %{y:,.0f}<extra></extra>",
     ))
     layout = _base_layout(height=340, title="Monthly Bill Trend (PKR)")
@@ -325,7 +315,6 @@ def chart_bill_trend(history_df):
 
 
 def chart_appliance_modern(app_df):
-    """Modern donut with legend, no clutter."""
     labels = app_df["Appliance"].tolist()
     values = app_df["kWh/Month"].tolist()
 
@@ -335,36 +324,26 @@ def chart_appliance_modern(app_df):
         "#7EE787",
     ]
     fig = go.Figure(go.Pie(
-        labels=labels,
-        values=values,
-        hole=0.58,
-        marker=dict(
-            colors=palette[:len(labels)],
-            line=dict(color=COLORS["bg"], width=2),
-        ),
-        textinfo="percent",
-        textposition="inside",
-        insidetextorientation="horizontal",
-        textfont=dict(color="#0D1117", size=11, family="-apple-system"),
+        labels=labels, values=values, hole=0.58,
+        marker=dict(colors=palette[:len(labels)],
+                    line=dict(color=COLORS["bg"], width=2)),
+        textinfo="percent", textposition="inside",
+        textfont=dict(color="#0D1117", size=11),
         hovertemplate="<b>%{label}</b><br>%{value:.1f} kWh/mo<br>%{percent}<extra></extra>",
         sort=True,
     ))
     layout = _base_layout(height=420, title="Appliance Monthly Consumption")
     layout["showlegend"] = True
-    layout["legend"] = dict(
-        orientation="v",
-        yanchor="middle", y=0.5,
-        xanchor="left", x=1.02,
-        bgcolor="rgba(0,0,0,0)",
-        font=dict(color=COLORS["text"], size=11),
-    )
+    layout["legend"] = dict(orientation="v", yanchor="middle", y=0.5,
+                            xanchor="left", x=1.02,
+                            bgcolor="rgba(0,0,0,0)",
+                            font=dict(color=COLORS["text"], size=11))
     layout["margin"] = dict(l=10, r=10, t=50, b=10)
     fig.update_layout(**layout)
     return fig
 
 
 def chart_consumption_line(history_df, appliance_estimate):
-    """Modern smooth line of past consumption vs appliance estimate."""
     df = history_df.copy()
     df["cons"] = pd.to_numeric(df.get("Consumption (kWh)"), errors="coerce")
     df = df.dropna(subset=["cons"])
@@ -373,15 +352,13 @@ def chart_consumption_line(history_df, appliance_estimate):
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=df["Month"], y=df["cons"],
-        mode="lines+markers",
+        x=df["Month"], y=df["cons"], mode="lines+markers",
         name="Metered Consumption",
         line=dict(color=COLORS["primary"], width=3,
                   shape="spline", smoothing=0.9),
         marker=dict(size=10, color=COLORS["primary"],
                     line=dict(color="#FFFFFF", width=1.5)),
-        fill="tozeroy",
-        fillcolor="rgba(88,166,255,0.12)",
+        fill="tozeroy", fillcolor="rgba(88,166,255,0.12)",
         hovertemplate="<b>%{x}</b><br>Consumption: %{y:.0f} kWh<extra></extra>",
     ))
     fig.add_hline(
@@ -400,7 +377,7 @@ def chart_consumption_line(history_df, appliance_estimate):
 
 
 # =============================================================
-# LLM CALL
+# LLM CALL — CONSERVATIVE AVERAGE SOLAR ESTIMATE
 # =============================================================
 def call_llm_analysis(solar_kwp, battery_kwh, appliances_df, history_df):
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
@@ -411,24 +388,31 @@ def call_llm_analysis(solar_kwp, battery_kwh, appliances_df, history_df):
     history_table = _fmt_history_table(history_df)
     appliance_monthly = sum(a.monthly_kwh for a in appliances_df)
 
+    # Pre-computed conservative reference values
+    ref = formula_solar_estimate(solar_kwp)
+
     system_prompt = (
-        "You are a senior solar energy engineer and energy advisor for Lahore, "
-        "Pakistan. You know:\n"
-        "- Lahore irradiance: ~5.2 peak sun hours/day annual average\n"
-        "- Residential PV system losses: ~20%\n"
-        "- LiFePO4 battery round-trip efficiency: ~85%\n"
-        "- LESCO protected-consumer tariff: 200 units/month threshold\n"
-        "RULES: Use realistic engineering estimates. Never invent numbers. "
-        "Return ONLY valid JSON matching the schema. Battery is charged ONLY by "
-        "solar PV. System is CAPTIVE - no export, surplus is curtailed."
+        "You are a senior solar energy engineer for Lahore, Pakistan.\n"
+        "STRICT RULES:\n"
+        "- Use the EXACT constants provided below. Do NOT vary them.\n"
+        "- Use CONSERVATIVE AVERAGE values (not optimistic peak, not pessimistic worst-case).\n"
+        "- Do NOT invent irradiance or efficiency numbers.\n"
+        "- Return ONLY valid JSON matching the schema.\n"
+        "- Battery is charged ONLY by solar PV. System is CAPTIVE - no export.\n"
     )
 
     user_prompt = """
+CONSTANTS (use exactly — do not change)
+- Lahore annual average Peak Sun Hours (PSH): 4.8 hours/day
+- PV system losses: 20% (0.80 efficiency factor)
+- Days per month: 30
+- Battery round-trip efficiency: 85%
+
 SYSTEM
 - Location: Lahore, Pakistan
-- System: Captive solar + battery (NO export)
+- System: Captive solar + battery (NO export, surplus curtailed)
 - Battery: solar-PV charged only
-- LESCO limit: 200 kWh/month
+- LESCO protected limit: 200 kWh/month
 - Solar: {solar_kwp} kWp | Battery: {battery_kwh} kWh
 
 APPLIANCES
@@ -439,15 +423,24 @@ APPLIANCE MONTHLY ESTIMATE: {appl:.0f} kWh
 12-MONTH HISTORY (Oct 2025 - Sep 2026)
 {history}
 
+REFERENCE CALCULATION (must match your output within ±5%)
+For {solar_kwp} kWp using the constants above:
+- Daily  = {solar_kwp} x 4.8 x 0.80 = {ref_daily} kWh/day
+- Monthly = {ref_daily} x 30 = {ref_monthly} kWh/month
+- Annual  = {ref_monthly} x 12 = {ref_annual} kWh/year
+
 TASKS
-1. Estimate monthly solar PV generation for {solar_kwp} kWp in Lahore using
-   realistic irradiance and ~20% system losses.
-2. Provide SOLAR PV USAGE STRATEGY (3-5 concrete tips) for captive mode.
-3. Provide FOUR TOP RECOMMENDATIONS:
+1. Solar PV generation estimate for {solar_kwp} kWp in Lahore.
+   Use the constants above. Do NOT exceed the reference by more than 5%.
+
+2. SOLAR PV USAGE STRATEGY (3-5 concrete tips) for captive mode.
+
+3. FOUR TOP RECOMMENDATIONS:
    a. INCREASE SOLAR? (Yes/No + kWp)
    b. INCREASE BATTERY? (Yes/No + kWh)
    c. 2nd LESCO METER? (Recommended/Not recommended/Consider + legal warning)
    d. LOAD OPTIMIZATION (3-5 specific actions)
+
 4. SHORT SUMMARY (2-3 sentences).
 
 Return ONLY this JSON:
@@ -465,8 +458,12 @@ Return ONLY this JSON:
   }},
   "summary": "<2-3 sentences>"
 }}
-""".format(solar_kwp=solar_kwp, battery_kwh=battery_kwh,
-           table=appliance_table, appl=appliance_monthly, history=history_table)
+""".format(
+        solar_kwp=solar_kwp, battery_kwh=battery_kwh,
+        table=appliance_table, appl=appliance_monthly, history=history_table,
+        ref_daily=ref["daily_kwh"], ref_monthly=ref["monthly_kwh"],
+        ref_annual=ref["annual_kwh"],
+    )
 
     try:
         r = requests.post(
@@ -476,12 +473,28 @@ Return ONLY this JSON:
             json={"model": GROQ_MODEL,
                   "messages": [{"role": "system", "content": system_prompt},
                                {"role": "user", "content": user_prompt}],
-                  "temperature": 0.4, "max_tokens": 2500,
+                  "temperature": 0.2,
+                  "max_tokens": 2500,
                   "response_format": {"type": "json_object"}},
             timeout=90,
         )
         r.raise_for_status()
-        return json.loads(r.json()["choices"][0]["message"]["content"])
+        result = json.loads(r.json()["choices"][0]["message"]["content"])
+
+        # Safety net: if LLM deviates >15% from the formula, override with formula
+        se = result.get("solar_estimate", {})
+        llm_monthly = se.get("monthly_kwh", 0) or 0
+        ref_monthly = ref["monthly_kwh"]
+        if ref_monthly > 0 and abs(llm_monthly - ref_monthly) / ref_monthly > 0.15:
+            se["daily_kwh"] = ref["daily_kwh"]
+            se["monthly_kwh"] = ref["monthly_kwh"]
+            se["annual_kwh"] = ref["annual_kwh"]
+            se["assumptions"] = (
+                "Conservative average using Lahore annual avg PSH 4.8 h/day "
+                "and 20% system losses (formula-based correction applied)."
+            )
+            result["solar_estimate"] = se
+        return result
     except requests.exceptions.HTTPError as e:
         code = e.response.status_code if e.response is not None else 0
         if code == 401:
@@ -501,9 +514,6 @@ Return ONLY this JSON:
 st.set_page_config(page_title="Home Energy Manager", page_icon="⚡",
                    layout="wide", initial_sidebar_state="expanded")
 
-# -------------------------------------------------------------
-# HIGH-CONTRAST CSS (identical to v3.1)
-# -------------------------------------------------------------
 st.markdown("""
 <style>
     .stApp {
@@ -580,7 +590,6 @@ st.markdown("""
     .rec-warning { border-left-color: #D29922; }
     .rec-success { border-left-color: #3FB950; }
     .rec-info    { border-left-color: #58A6FF; }
-
     .rec-focus {
         font-size: 0.74rem; font-weight: 700;
         color: #58A6FF !important;
@@ -589,24 +598,19 @@ st.markdown("""
     }
     .rec-title {
         font-weight: 800; font-size: 1.12rem;
-        color: #FFFFFF !important;
-        margin-bottom: 0.4rem;
+        color: #FFFFFF !important; margin-bottom: 0.4rem;
     }
     .rec-msg {
         font-size: 0.95rem;
-        color: #C9D1D9 !important;
-        line-height: 1.55;
+        color: #C9D1D9 !important; line-height: 1.55;
     }
 
     .solar-card {
         background: linear-gradient(135deg, rgba(255,223,74,0.15), rgba(255,223,74,0.04));
         border: 1px solid rgba(255,223,74,0.55);
         border-radius: 12px;
-        padding: 1rem 1.4rem;
-        margin: 0.5rem 0;
-        color: #FFDF4A !important;
-        font-size: 0.98rem;
-        line-height: 1.6;
+        padding: 1rem 1.4rem; margin: 0.5rem 0;
+        color: #FFDF4A !important; font-size: 0.98rem; line-height: 1.6;
     }
     .solar-card b { color: #FFEB8A !important; }
 
@@ -614,10 +618,8 @@ st.markdown("""
         background: rgba(255,223,74,0.10);
         border: 1px solid rgba(255,223,74,0.45);
         border-radius: 10px;
-        padding: 0.7rem 1rem;
-        font-size: 0.85rem;
-        color: #FFDF4A !important;
-        margin: 0.5rem 0;
+        padding: 0.7rem 1rem; font-size: 0.85rem;
+        color: #FFDF4A !important; margin: 0.5rem 0;
     }
 
     div[data-testid="stAlert"] { border-radius: 10px; padding: 0.9rem 1.1rem; }
@@ -632,12 +634,9 @@ st.markdown("""
     .stButton > button {
         background: linear-gradient(90deg, #1F6FEB, #58A6FF);
         color: #FFFFFF !important;
-        border: none;
-        border-radius: 10px;
-        font-weight: 700;
-        font-size: 1rem;
-        padding: 0.6rem 1rem;
-        transition: all 0.2s;
+        border: none; border-radius: 10px;
+        font-weight: 700; font-size: 1rem;
+        padding: 0.6rem 1rem; transition: all 0.2s;
     }
     .stButton > button:hover {
         background: linear-gradient(90deg, #58A6FF, #1F6FEB);
@@ -660,28 +659,24 @@ st.markdown("""
     div[data-testid="stExpander"] {
         background: #0D1117;
         border: 1px solid #30363D;
-        border-radius: 10px;
-        margin-bottom: 0.4rem;
+        border-radius: 10px; margin-bottom: 0.4rem;
     }
     div[data-testid="stExpander"] summary,
     div[data-testid="stExpander"] summary * {
-        color: #F0F6FC !important;
-        font-weight: 600;
+        color: #F0F6FC !important; font-weight: 600;
     }
     div[data-testid="stExpander"] p,
     div[data-testid="stExpander"] span,
     div[data-testid="stExpander"] label { color: #F0F6FC !important; }
 
     div[data-testid="stDataFrame"] {
-        background: #0D1117;
-        border-radius: 10px;
+        background: #0D1117; border-radius: 10px;
         border: 1px solid #30363D;
     }
     div[data-testid="stDataFrame"] * { color: #F0F6FC !important; }
     div[data-testid="stDataFrame"] th {
         background: #1F2937 !important;
-        color: #FFFFFF !important;
-        font-weight: 700 !important;
+        color: #FFFFFF !important; font-weight: 700 !important;
     }
     div[data-testid="stDataFrame"] td {
         background: #0D1117 !important;
@@ -695,13 +690,11 @@ st.markdown("""
     div[data-testid="stMarkdownContainer"] p,
     div[data-testid="stMarkdownContainer"] li,
     div[data-testid="stMarkdownContainer"] span {
-        color: #F0F6FC !important;
-        line-height: 1.6;
+        color: #F0F6FC !important; line-height: 1.6;
     }
     div[data-testid="stMarkdownContainer"] strong,
     div[data-testid="stMarkdownContainer"] b {
-        color: #FFFFFF !important;
-        font-weight: 700;
+        color: #FFFFFF !important; font-weight: 700;
     }
     div[data-testid="stMarkdownContainer"] code {
         background: #21262D !important;
@@ -784,6 +777,14 @@ with st.sidebar:
     st.session_state.battery_kwh = st.slider(
         "Battery (kWh)", 0.0, 80.0, st.session_state.battery_kwh, 1.0)
 
+    # Show conservative solar preview
+    _preview = formula_solar_estimate(st.session_state.solar_kwp)
+    st.info(
+        "**Avg estimate** (PSH 4.8, losses 20%):\n"
+        "- Daily: {:.1f} kWh\n"
+        "- Monthly: {:.0f} kWh".format(_preview["daily_kwh"], _preview["monthly_kwh"])
+    )
+
     st.markdown("---")
     st.markdown("## 📊 Monthly History")
     st.caption("Oct 2025 → Sep 2026. Fill only what you have.")
@@ -812,7 +813,7 @@ st.markdown('<div class="main-header">Home Energy Manager</div>', unsafe_allow_h
 st.markdown(
     "<p style='text-align:center; color:#B0BAC5;'>"
     "September 2026 | LESCO Protected Consumer | "
-    "Captive Solar (No Export) | LLM-Driven Analysis</p>",
+    "Captive Solar (No Export) | Conservative Average Estimates</p>",
     unsafe_allow_html=True,
 )
 st.markdown("---")
@@ -820,6 +821,8 @@ st.markdown("---")
 # =============================================================
 # METRICS
 # =============================================================
+ref_preview = formula_solar_estimate(st.session_state.solar_kwp)
+
 c1, c2, c3, c4 = st.columns(4)
 with c1:
     st.metric("Appliance Est.", "{:.0f} kWh/mo".format(appliance_monthly))
@@ -828,8 +831,7 @@ with c2:
 with c3:
     st.metric("Avg Bill", "PKR {:,.0f}".format(avg_bill) if avg_bill else "—")
 with c4:
-    gap = appliance_monthly - avg_cons
-    st.metric("Est. vs Metered", "{:+.0f} kWh".format(gap))
+    st.metric("Solar Avg (est.)", "{:.0f} kWh/mo".format(ref_preview["monthly_kwh"]))
 
 # =============================================================
 # SYSTEM SUMMARY
@@ -852,13 +854,13 @@ with sc2:
         '<b>Protected limit:</b> 200 kWh/month<br>'
         '<b>Months of history:</b> {}<br>'
         '<b>Appliances tracked:</b> {}<br>'
-        '<b>Engine:</b> Groq · openai/gpt-oss-120b'
+        '<b>Solar estimate constants:</b> PSH 4.8 · losses 20%'
         '</div>'.format(len(cons_list), len(appliances)),
         unsafe_allow_html=True,
     )
 
 # =============================================================
-# MODERN CHARTS ROW 1 — Consumption trend + Donut
+# MODERN CHARTS ROW 1
 # =============================================================
 st.markdown("### 📊 Consumption Analytics")
 col_left, col_right = st.columns([1.15, 1])
@@ -882,7 +884,7 @@ with col_right:
     st.plotly_chart(chart_appliance_modern(app_df), use_container_width=True)
 
 # =============================================================
-# MODERN CHARTS ROW 2 — Stacked + Bill Trend
+# MODERN CHARTS ROW 2
 # =============================================================
 col_l2, col_r2 = st.columns(2)
 
@@ -897,7 +899,7 @@ with col_r2:
         st.info("📝 Add monthly Bill (PKR) in the sidebar to see the bill trend.")
 
 # =============================================================
-# SOLAR UTILIZATION (if data present)
+# SOLAR UTILIZATION
 # =============================================================
 fig_util = chart_solar_utilization(history_df)
 if fig_util:
@@ -912,7 +914,7 @@ app_detail["% of Total"] = (app_detail["kWh/Month"] / appliance_monthly * 100).r
 st.dataframe(app_detail, hide_index=True, use_container_width=True)
 
 # =============================================================
-# HISTORY TABLE VIEW
+# HISTORY TABLE
 # =============================================================
 st.markdown("### 📊 12-Month Data (Oct 2025 → Sep 2026)")
 st.dataframe(st.session_state.hist_df, hide_index=True, use_container_width=True)
@@ -923,8 +925,9 @@ st.dataframe(st.session_state.hist_df, hide_index=True, use_container_width=True
 st.markdown("---")
 st.markdown("### 🤖 LLM Analysis (Groq · gpt-oss-120b)")
 st.caption(
-    "The LLM estimates solar PV generation from real Lahore irradiance and "
-    "system loss factors, then produces strategy + 4 focus recommendations."
+    "Solar generation uses conservative average constants "
+    "(PSH 4.8, losses 20%). Results are validated against a formula "
+    "to prevent high or low outliers."
 )
 
 if st.button("🚀 Run LLM Analysis", use_container_width=True):
@@ -943,10 +946,10 @@ if analysis is None:
 elif "error" in analysis:
     st.error("⚠️ " + analysis["error"])
 else:
-    # ---------- SOLAR ESTIMATE ----------
+    # SOLAR ESTIMATE
     se = analysis.get("solar_estimate", {})
     if se:
-        st.markdown("#### ☀️ Solar PV Generation Estimate")
+        st.markdown("#### ☀️ Solar PV Generation Estimate (Average)")
         e1, e2, e3 = st.columns(3)
         with e1:
             st.metric("Daily", "{:.1f} kWh".format(se.get("daily_kwh", 0)))
@@ -962,7 +965,7 @@ else:
                 unsafe_allow_html=True,
             )
 
-    # ---------- STRATEGY ----------
+    # STRATEGY
     strategy = analysis.get("solar_usage_strategy", [])
     if strategy:
         st.markdown("#### 💡 Solar PV Usage Strategy")
@@ -974,7 +977,7 @@ else:
                 unsafe_allow_html=True,
             )
 
-    # ---------- RECOMMENDATIONS ----------
+    # RECOMMENDATIONS
     recs = analysis.get("recommendations", {})
     if recs:
         st.markdown("#### 🎯 Top Recommendations")
@@ -1043,7 +1046,7 @@ else:
                     unsafe_allow_html=True,
                 )
 
-    # ---------- SUMMARY ----------
+    # SUMMARY
     summary = analysis.get("summary")
     if summary:
         st.markdown("#### 📝 Summary")
@@ -1067,8 +1070,8 @@ st.warning(
 st.markdown("---")
 st.markdown(
     '<p style="text-align:center; color:#A0AAB5; font-size:0.8rem;">'
-    'Home Energy Manager v3.2 | Oct 2025 → Sep 2026 | '
-    'Captive Solar (No Export) | Groq · openai/gpt-oss-120b'
+    'Home Energy Manager v3.3 | Oct 2025 → Sep 2026 | '
+    'Conservative Solar Averages | Groq · openai/gpt-oss-120b'
     '</p>',
     unsafe_allow_html=True,
 )
