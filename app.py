@@ -3,7 +3,9 @@ Home Energy Management Dashboard
 LESCO Protected Consumer Optimizer - September 2026
 
 Captive solar (no export). Fully editable appliances.
-14-month history: Aug 2025 -> Sep 2026.
+Solar GENERATION is estimated by the app (kWp x peak sun hours).
+User provides what was ACTUALLY USED from solar.
+History: Aug 2025 -> Sep 2026.
 """
 import os
 import requests
@@ -39,7 +41,7 @@ BATTERY_EFFICIENCY = 0.85
 GROQ_MODEL = "openai/gpt-oss-120b"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# 14-month window: Aug 2025 -> Sep 2026 (matches user's data range)
+# 14-month window: Aug 2025 -> Sep 2026
 DEFAULT_MONTH_SEQ = [
     "Aug-25", "Sep-25", "Oct-25", "Nov-25", "Dec-25",
     "Jan-26", "Feb-26", "Mar-26", "Apr-26", "May-26",
@@ -55,24 +57,23 @@ COLORS = {
 }
 
 # =============================================================
-# DEFAULT APPLIANCES - Your peak-load configuration
+# DEFAULT APPLIANCES
 # -------------------------------------------------------------
-# NOTE: These are RUNNING averages for inverter appliances.
-# The user's observed PEAK monthly consumption = 505 kWh.
-# Editing fields adjust the appliance-based estimate only.
+# Running-average watts for inverter appliances.
+# User can edit any field, add new, or remove.
 # =============================================================
 DEFAULT_APPLIANCES = [
-    {"name": "Inverter AC 1.5T @26C (2x/week, 6h)",  "watts": 550,  "hours": 6.0,  "days_per_week": 2, "qty": 1},
-    {"name": "Inverter AC 1.5T @26C (daily, 16h)",   "watts": 550,  "hours": 16.0, "days_per_week": 7, "qty": 1},
-    {"name": "Inverter AC 1.0T @26C (daily, 16h)",   "watts": 420,  "hours": 16.0, "days_per_week": 7, "qty": 1},
-    {"name": "Microwave Oven (15 min/day)",          "watts": 1200, "hours": 0.25, "days_per_week": 7, "qty": 1},
-    {"name": "Washing Machine (4h/week)",            "watts": 500,  "hours": 4.0,  "days_per_week": 1, "qty": 1},
-    {"name": "Submersible Pump (2h/day)",            "watts": 750,  "hours": 2.0,  "days_per_week": 7, "qty": 1},
-    {"name": "Machine 3kW (5h, 2x/week)",            "watts": 3000, "hours": 5.0,  "days_per_week": 2, "qty": 1},
-    {"name": "RO Plant 1.5kW (5h, 2x/week)",         "watts": 1500, "hours": 5.0,  "days_per_week": 2, "qty": 1},
-    {"name": "Ceiling Fan (BLDC)",                   "watts": 28,   "hours": 12.0, "days_per_week": 7, "qty": 6},
-    {"name": "LED Light 12W",                        "watts": 12,   "hours": 6.0,  "days_per_week": 7, "qty": 30},
-    {"name": "Philips Iron (3h/week)",               "watts": 1000, "hours": 3.0,  "days_per_week": 1, "qty": 1},
+    {"name": "Inverter AC 1.5T @26C (2x/week, 6h)", "watts": 550,  "hours": 6.0,  "days_per_week": 2, "qty": 1},
+    {"name": "Inverter AC 1.5T @26C (daily, 16h)",  "watts": 550,  "hours": 16.0, "days_per_week": 7, "qty": 1},
+    {"name": "Inverter AC 1.0T @26C (daily, 16h)",  "watts": 420,  "hours": 16.0, "days_per_week": 7, "qty": 1},
+    {"name": "Microwave Oven (15 min/day)",         "watts": 1200, "hours": 0.25, "days_per_week": 7, "qty": 1},
+    {"name": "Washing Machine (4h/week)",           "watts": 500,  "hours": 4.0,  "days_per_week": 1, "qty": 1},
+    {"name": "Submersible Pump (2h/day)",           "watts": 750,  "hours": 2.0,  "days_per_week": 7, "qty": 1},
+    {"name": "Machine 3kW (5h, 2x/week)",           "watts": 3000, "hours": 5.0,  "days_per_week": 2, "qty": 1},
+    {"name": "RO Plant 1.5kW (5h, 2x/week)",        "watts": 1500, "hours": 5.0,  "days_per_week": 2, "qty": 1},
+    {"name": "Ceiling Fan (BLDC)",                  "watts": 28,   "hours": 12.0, "days_per_week": 7, "qty": 6},
+    {"name": "LED Light 12W",                       "watts": 12,   "hours": 6.0,  "days_per_week": 7, "qty": 30},
+    {"name": "Philips Iron (3h/week)",              "watts": 1000, "hours": 3.0,  "days_per_week": 1, "qty": 1},
 ]
 
 # =============================================================
@@ -208,7 +209,14 @@ def calibrate_tariff(kwh_csv: str, bill_csv: str) -> Tariff:
 
 
 # =============================================================
-# ENERGY COMPUTATION (captive solar - no export)
+# ENERGY COMPUTATION
+# -------------------------------------------------------------
+# Captive solar - no export.
+#   1. Solar serves day-load directly.
+#   2. Surplus charges battery (capped by battery kWh).
+#   3. Remaining surplus is CURTAILED (wasted).
+#   4. Battery discharges at night (after round-trip losses).
+#   5. Grid covers whatever solar-direct + battery cannot.
 # =============================================================
 def build_snapshot(appliances, system, tariff):
     s = Snapshot(appliances=appliances, system=system, tariff=tariff)
@@ -242,70 +250,74 @@ def build_snapshot(appliances, system, tariff):
 
 
 # =============================================================
-# RECOMMENDATIONS ENGINE (4 focus areas)
+# RECOMMENDATIONS ENGINE — 4 FOCUS AREAS
 # =============================================================
 def generate_recommendations(snap, hist):
     """
-    Focus areas:
-      1. Increase Solar?
-      2. Increase Battery?
-      3. 2nd LESCO Meter?
-      4. Load Optimization?
+    1. INCREASE SOLAR?       (if required)
+    2. INCREASE BATTERY?     (if required)
+    3. 2nd LESCO METER?      (legal guidance)
+    4. LOAD OPTIMIZATION     (biggest load + estimate vs metered)
     """
     recs = []
     avg_consumption = hist["avg_consumption"]
-    avg_solar_gen = hist["avg_solar_gen"]
     avg_solar_used = hist["avg_solar_used"]
     avg_lesco = hist["avg_lesco"]
 
-    # ---------- FOCUS 1: INCREASE SOLAR? ----------
+    # ---- Estimated solar generation from current kWp ----
+    est_solar_gen = snap.solar_monthly_kwh
+    util_pct = (avg_solar_used / est_solar_gen * 100.0) if est_solar_gen > 0 else 0.0
+    wasted = max(0.0, est_solar_gen - avg_solar_used)
+
+    # ---------- 1. INCREASE SOLAR? ----------
     if avg_lesco > 200:
         shortfall = avg_lesco - 200
         extra_kwp = shortfall / (LAHORE_PEAK_SUN_HOURS * 30)
         recs.append({
             "focus": "INCREASE SOLAR?",
             "level": "danger",
-            "title": "Yes — Solar is undersized by ~{:.1f} kWp".format(extra_kwp),
+            "title": "Yes — add ~{:.1f} kWp solar".format(extra_kwp),
             "message": (
-                "Metered LESCO import averages {:.0f} units/month. To bring it "
-                "under 200 you need ~{:.1f} kWp additional solar. "
-                "Your peak was 505 units — with captive solar and no export, "
-                "extra solar is the primary lever.".format(avg_lesco, extra_kwp)
+                "Metered LESCO import averages {:.0f} units/month. "
+                "To bring it under 200, add approximately {:.1f} kWp "
+                "(assuming full daytime utilization).".format(
+                    avg_lesco, extra_kwp)
             ),
-            "action": "Add {:.1f} kWp solar → target ≤200 units/month".format(extra_kwp),
+            "action": "Add {:.1f} kWp solar".format(extra_kwp),
         })
     elif avg_lesco > 180:
         recs.append({
             "focus": "INCREASE SOLAR?",
             "level": "warning",
-            "title": "Marginal — near the 200-unit limit",
-            "message": "Average LESCO import is {:.0f} units. Add 1–2 kWp as buffer.".format(avg_lesco),
-            "action": "Add 1–2 kWp for safety margin",
+            "title": "Marginal — add 1–2 kWp buffer",
+            "message": (
+                "Average LESCO import is {:.0f} units. Close to the 200 limit. "
+                "A small solar addition provides headroom.".format(avg_lesco)
+            ),
+            "action": "Add 1–2 kWp solar for safety",
         })
     else:
         recs.append({
             "focus": "INCREASE SOLAR?",
             "level": "success",
-            "title": "No — Solar is adequate",
-            "message": "Average LESCO import is {:.0f} units, comfortably under 200.".format(avg_lesco),
-            "action": "Maintain current solar capacity",
+            "title": "No — solar is adequate",
+            "message": (
+                "Average LESCO import is {:.0f} units, comfortably under 200.".format(avg_lesco)
+            ),
+            "action": "Maintain current solar",
         })
 
-    # ---------- FOCUS 2: INCREASE BATTERY? ----------
+    # ---------- 2. INCREASE BATTERY? ----------
     ideal_battery = snap.night_load_daily / BATTERY_EFFICIENCY
-    util_pct = (avg_solar_used / avg_solar_gen * 100.0) if avg_solar_gen > 0 else 100.0
-    wasted = max(0.0, avg_solar_gen - avg_solar_used)
-
     if snap.system.battery_kwh < ideal_battery * 0.8:
         recs.append({
             "focus": "INCREASE BATTERY?",
             "level": "warning",
-            "title": "Yes — Battery is undersized",
+            "title": "Yes — battery is undersized",
             "message": (
                 "Night load is ~{:.1f} kWh/night. Ideal battery is ~{:.1f} kWh "
-                "but you have {:.1f} kWh. Increasing battery shifts more night "
-                "load off the grid.".format(snap.night_load_daily, ideal_battery,
-                                             snap.system.battery_kwh)
+                "but you have {:.1f} kWh.".format(
+                    snap.night_load_daily, ideal_battery, snap.system.battery_kwh)
             ),
             "action": "Increase battery to ~{:.0f} kWh".format(ideal_battery),
         })
@@ -313,21 +325,22 @@ def generate_recommendations(snap, hist):
         recs.append({
             "focus": "INCREASE BATTERY?",
             "level": "warning",
-            "title": "Yes — Solar utilization only {:.0f}%".format(util_pct),
+            "title": "Yes — solar utilization only {:.0f}%".format(util_pct),
             "message": (
-                "~{:.0f} units/month of solar are being curtailed (wasted). "
-                "Since there is no export, larger battery captures this surplus."
-            ).format(wasted),
+                "Estimated generation is {:.0f} units but only {:.0f} are used. "
+                "~{:.0f} units/month are curtailed. Larger battery captures "
+                "this surplus.".format(est_solar_gen, avg_solar_used, wasted)
+            ),
             "action": "Increase battery to ~{:.0f} kWh".format(ideal_battery),
         })
     elif snap.system.battery_kwh > ideal_battery * 1.5:
         recs.append({
             "focus": "INCREASE BATTERY?",
             "level": "info",
-            "title": "No — Battery may be oversized",
+            "title": "No — battery may be oversized",
             "message": (
                 "Battery ({:.0f} kWh) far exceeds night load ({:.1f} kWh). "
-                "Additional capacity is unlikely to be used.".format(
+                "Additional capacity unlikely to be used.".format(
                     snap.system.battery_kwh, snap.night_load_daily)
             ),
             "action": "Current battery is sufficient",
@@ -336,35 +349,35 @@ def generate_recommendations(snap, hist):
         recs.append({
             "focus": "INCREASE BATTERY?",
             "level": "success",
-            "title": "No — Battery is well-sized",
-            "message": "Battery capacity matches your night load profile.",
-            "action": "Maintain current battery capacity",
+            "title": "No — battery is well-sized",
+            "message": "Battery matches your night load profile.",
+            "action": "Maintain current battery",
         })
 
-    # ---------- FOCUS 3: 2nd LESCO METER? ----------
+    # ---------- 3. 2nd LESCO METER? ----------
     if avg_lesco > 200 and avg_lesco < 450:
         recs.append({
             "focus": "2nd LESCO METER?",
             "level": "danger",
-            "title": "Not recommended — Legal risk",
+            "title": "Not recommended — legal risk",
             "message": (
-                "A 2nd meter is only legal for genuinely separate families with "
-                "independent kitchens and wiring. LESCO actively cracks down. "
-                "Solar + battery is the safer path."
+                "A 2nd meter is only legal for genuinely separate families "
+                "with independent kitchens and wiring. LESCO actively cracks "
+                "down. Solar + battery is the safer path."
             ),
-            "action": "Prefer solar/battery expansion over 2nd meter",
+            "action": "Expand solar/battery instead",
         })
     elif avg_lesco >= 450:
         recs.append({
             "focus": "2nd LESCO METER?",
             "level": "warning",
-            "title": "Consider only if legally separable",
+            "title": "Only if legally separable",
             "message": (
-                "Your consumption is very high. If you have a genuinely separate "
+                "Consumption is very high. If you have a genuinely separate "
                 "portion of the home (kitchen + wiring), a 2nd meter may be "
                 "defensible — otherwise expand solar."
             ),
-            "action": "Evaluate legal 2nd meter vs. more solar",
+            "action": "Evaluate legality before applying",
         })
     else:
         recs.append({
@@ -375,7 +388,7 @@ def generate_recommendations(snap, hist):
             "action": "No 2nd meter required",
         })
 
-    # ---------- FOCUS 4: LOAD OPTIMIZATION ----------
+    # ---------- 4. LOAD OPTIMIZATION ----------
     if snap.appliances:
         biggest = max(snap.appliances, key=lambda a: a.monthly_kwh)
         pct = (biggest.monthly_kwh / max(snap.total_monthly_kwh, 1)) * 100
@@ -384,40 +397,40 @@ def generate_recommendations(snap, hist):
             "level": "info",
             "title": "Biggest load: {} ({:.0f}%)".format(biggest.name, pct),
             "message": (
-                "'{}' accounts for {:.0f} kWh/month. Shift its runtime to "
-                "10 AM–3 PM to use solar directly and reduce battery cycling."
-            ).format(biggest.name, biggest.monthly_kwh),
-            "action": "Shift {} to 10 AM – 3 PM".format(biggest.name),
-        })
-        # Peak reference
-        recs.append({
-            "focus": "LOAD OPTIMIZATION",
-            "level": "info",
-            "title": "Peak observed: 505 kWh/month",
-            "message": (
-                "Your appliance-based estimate is {:.0f} kWh/month. If the "
-                "metered peak was 505, real-world running watts are ~{:.0f}% "
-                "higher than estimated. Adjust wattages to match."
-            ).format(
-                snap.total_monthly_kwh,
-                max(0, (505 / max(snap.total_monthly_kwh, 1) - 1) * 100),
+                "'{}' accounts for {:.0f} kWh/month ({:.0f}% of total). "
+                "Shift its runtime to 10 AM–3 PM to use solar directly and "
+                "reduce battery cycling.".format(
+                    biggest.name, biggest.monthly_kwh, pct)
             ),
-            "action": "Fine-tune appliance wattages vs. 505 kWh peak",
+            "action": "Shift {} to 10 AM – 3 PM".format(biggest.name),
         })
 
     # Appliance estimate vs metered comparison
     if avg_consumption > 0 and snap.total_monthly_kwh > 0:
         diff_pct = ((snap.total_monthly_kwh - avg_consumption) / avg_consumption) * 100.0
         if abs(diff_pct) > 20:
+            direction = "higher" if diff_pct > 0 else "lower"
             recs.append({
                 "focus": "LOAD OPTIMIZATION",
                 "level": "warning",
-                "title": "Estimate off by {:.0f}%".format(abs(diff_pct)),
+                "title": "Appliance estimate is {:.0f}% {}".format(abs(diff_pct), direction),
                 "message": (
-                    "Appliance estimate = {:.0f} kWh, metered = {:.0f} kWh. "
-                    "Adjust wattages / hours to match reality."
-                ).format(snap.total_monthly_kwh, avg_consumption),
-                "action": "Fine-tune appliance parameters",
+                    "Appliance-based estimate = {:.0f} kWh/month, metered = "
+                    "{:.0f} kWh/month. Fine-tune wattages / hours to match "
+                    "reality.".format(snap.total_monthly_kwh, avg_consumption)
+                ),
+                "action": "Adjust appliance parameters",
+            })
+        else:
+            recs.append({
+                "focus": "LOAD OPTIMIZATION",
+                "level": "success",
+                "title": "Appliance estimate matches metered data",
+                "message": (
+                    "Estimate = {:.0f} kWh, metered = {:.0f} kWh ({:.0f}% diff)."
+                    .format(snap.total_monthly_kwh, avg_consumption, abs(diff_pct))
+                ),
+                "action": "No adjustment needed",
             })
 
     return recs
@@ -426,8 +439,9 @@ def generate_recommendations(snap, hist):
 # =============================================================
 # AI ADVISOR
 # =============================================================
-def run_ai_advisor(appliance_summary, solar_kwp, battery_kwh, monthly_units,
-                   avg_consumption, avg_solar_gen, avg_solar_used):
+def run_ai_advisor(appliance_summary, solar_kwp, battery_kwh,
+                   monthly_units, avg_consumption,
+                   est_solar_gen, avg_solar_used):
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
         return "AI advisor is disabled. Add GROQ_API_KEY to Streamlit Secrets."
@@ -443,12 +457,12 @@ def run_ai_advisor(appliance_summary, solar_kwp, battery_kwh, monthly_units,
         "Solar: {} kWp. Battery: {} kWh (solar-charged only).\n"
         "Est. grid import: {:.0f} units/month.\n"
         "Hist. avg consumption: {:.0f} units/month.\n"
-        "Hist. avg solar generation: {:.0f} units/month.\n"
-        "Hist. avg solar used: {:.0f} units/month.\n"
+        "Est. solar generation: {:.0f} units/month.\n"
+        "Hist. avg solar actually used: {:.0f} units/month.\n"
         "Answer 4 questions: (1) Increase solar? (2) Increase battery? "
         "(3) 2nd LESCO meter? (4) Top load-optimization tip?"
     ).format(appliance_summary, solar_kwp, battery_kwh, monthly_units,
-             avg_consumption, avg_solar_gen, avg_solar_used)
+             avg_consumption, est_solar_gen, avg_solar_used)
 
     try:
         r = requests.post(
@@ -526,11 +540,11 @@ st.markdown("""
         border-radius: 10px; padding: 0.6rem 0.9rem;
         font-size: 0.82rem; color: #FFDF4A; margin: 0.5rem 0;
     }
-    .peak-note {
-        background: rgba(248,81,73,0.08);
-        border: 1px solid rgba(248,81,73,0.3);
-        border-radius: 10px; padding: 0.55rem 0.9rem;
-        font-size: 0.82rem; color: #F85149; margin: 0.5rem 0;
+    .est-note {
+        background: rgba(88,166,255,0.08);
+        border: 1px solid rgba(88,166,255,0.3);
+        border-radius: 10px; padding: 0.5rem 0.9rem;
+        font-size: 0.78rem; color: #58A6FF; margin: 0.4rem 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -547,11 +561,10 @@ if "battery_kwh" not in st.session_state:
 if "hist_df" not in st.session_state:
     st.session_state.hist_df = pd.DataFrame({
         "Month": DEFAULT_MONTH_SEQ,
-        "Consumption (kWh)":   [None] * 14,
-        "Solar Gen (kWh)":     [None] * 14,
-        "Solar Used (kWh)":    [None] * 14,
-        "LESCO Import (kWh)":  [None] * 14,
-        "Bill (PKR)":          [None] * 14,
+        "Consumption (kWh)":  [None] * 14,
+        "Solar Used (kWh)":   [None] * 14,
+        "LESCO Import (kWh)": [None] * 14,
+        "Bill (PKR)":         [None] * 14,
     })
 if "ai_result" not in st.session_state:
     st.session_state.ai_result = ""
@@ -562,12 +575,6 @@ if "ai_result" not in st.session_state:
 with st.sidebar:
     st.markdown("## 🔌 Appliance Manager")
     st.caption("All fields editable. **Days/week** = 7 for daily use.")
-    st.markdown(
-        '<div class="peak-note">'
-        '📌 Peak metered: <b>505 kWh/month</b>. Adjust wattages to match.'
-        '</div>',
-        unsafe_allow_html=True,
-    )
 
     with st.expander("➕ Add New Appliance", expanded=False):
         n_name = st.text_input("Appliance Name", key="nn")
@@ -623,6 +630,11 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("## 📊 Monthly History")
+    st.markdown(
+        '<div class="est-note">ℹ️ Solar <b>generation</b> is estimated by '
+        'the app. Enter what was actually <b>used</b> from solar.</div>',
+        unsafe_allow_html=True,
+    )
     st.caption("Aug 2025 → Sep 2026. Fill any column; leave blanks empty.")
     st.session_state.hist_df = st.data_editor(
         st.session_state.hist_df,
@@ -645,19 +657,25 @@ def _clean(series):
 hist_lesco = _clean(df["LESCO Import (kWh)"])
 hist_bills = _clean(df["Bill (PKR)"])
 hist_consumption = _clean(df["Consumption (kWh)"])
-hist_solar_gen = _clean(df["Solar Gen (kWh)"])
 hist_solar_used = _clean(df["Solar Used (kWh)"])
 
 tariff = calibrate_tariff(",".join(map(str, hist_lesco)),
                           ",".join(map(str, hist_bills)))
 snap = build_snapshot(appliances, system, tariff)
 
+# Estimated solar generation from current kWp
+est_solar_gen = snap.solar_monthly_kwh
+
 hist = {
-    "avg_consumption": sum(hist_consumption) / len(hist_consumption) if hist_consumption else snap.total_monthly_kwh,
-    "avg_solar_gen": sum(hist_solar_gen) / len(hist_solar_gen) if hist_solar_gen else snap.solar_monthly_kwh,
-    "avg_solar_used": sum(hist_solar_used) / len(hist_solar_used) if hist_solar_used else snap.solar_direct_monthly,
-    "avg_lesco": sum(hist_lesco) / len(hist_lesco) if hist_lesco else snap.grid_import,
-    "avg_bill": sum(hist_bills) / len(hist_bills) if hist_bills else snap.bill["total"],
+    "avg_consumption": sum(hist_consumption) / len(hist_consumption)
+                       if hist_consumption else snap.total_monthly_kwh,
+    "avg_solar_used": sum(hist_solar_used) / len(hist_solar_used)
+                      if hist_solar_used else snap.solar_direct_monthly,
+    "avg_lesco": sum(hist_lesco) / len(hist_lesco)
+                 if hist_lesco else snap.grid_import,
+    "avg_bill": sum(hist_bills) / len(hist_bills)
+                if hist_bills else snap.bill["total"],
+    "est_solar_gen": est_solar_gen,
 }
 
 # =============================================================
@@ -693,14 +711,14 @@ with c1:
               delta="Protected" if snap.is_protected else "Unprotected",
               delta_color="normal" if snap.is_protected else "inverse")
 with c2:
-    st.metric("Metered Avg (14-mo)", "{:.0f} units".format(hist["avg_lesco"]))
+    st.metric("Metered Avg LESCO", "{:.0f} units".format(hist["avg_lesco"]))
 with c3:
-    st.metric("Solar Generation", "{:.0f} kWh".format(snap.solar_monthly_kwh),
-              delta="{:.0f} direct + {:.0f} battery".format(
-                  snap.solar_direct_monthly, snap.solar_to_battery_monthly))
+    st.metric("Est. Solar Generation", "{:.0f} kWh".format(est_solar_gen),
+              delta="estimate from {:.1f} kWp".format(snap.system.solar_kwp),
+              delta_color="off")
 with c4:
-    st.metric("Curtailed Solar", "{:.0f} kWh".format(snap.solar_curtailed_monthly),
-              delta="wasted", delta_color="off")
+    st.metric("Solar Actually Used", "{:.0f} kWh".format(hist["avg_solar_used"]),
+              delta="from history")
 
 # =============================================================
 # GAUGE
@@ -807,16 +825,23 @@ with c_right:
     else:
         st.info("Fill the history table in the sidebar.")
 
-# Solar utilization
-if hist_solar_gen and hist_solar_used:
-    st.markdown("### ☀️ Solar Generation vs. Utilization")
-    n = min(len(hist_solar_gen), len(hist_solar_used))
+# Solar generation estimate vs actual usage
+if hist_solar_used:
+    st.markdown("### ☀️ Estimated Generation vs. Actual Solar Used")
+    st.caption(
+        "Generation is estimated at {:.1f} kWp × {:.1f} peak sun hours. "
+        "Actual usage is your history input.".format(
+            snap.system.solar_kwp, LAHORE_PEAK_SUN_HOURS)
+    )
+    n = len(hist_solar_used)
     months = df["Month"].tolist()[:n]
     fig_u = go.Figure()
-    fig_u.add_trace(go.Bar(x=months, y=hist_solar_gen[:n],
-                            name="Generated", marker_color=COLORS["solar"], opacity=0.5))
-    fig_u.add_trace(go.Bar(x=months, y=hist_solar_used[:n],
-                            name="Used (on-site)", marker_color=COLORS["success"]))
+    fig_u.add_trace(go.Bar(x=months, y=[est_solar_gen] * n,
+                            name="Estimated Generation",
+                            marker_color=COLORS["solar"], opacity=0.55))
+    fig_u.add_trace(go.Bar(x=months, y=hist_solar_used,
+                            name="Actual Solar Used",
+                            marker_color=COLORS["success"]))
     fig_u.update_layout(barmode="overlay", height=320,
                         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                         font={"color": COLORS["text"]},
@@ -837,14 +862,10 @@ level_class = {"danger": "rec-danger", "warning": "rec-warning",
                "info": "rec-info", "success": "rec-success"}
 level_icon = {"danger": "🚨", "warning": "⚠️", "info": "💡", "success": "✅"}
 
-# Group by focus
 focus_order = ["INCREASE SOLAR?", "INCREASE BATTERY?",
                "2nd LESCO METER?", "LOAD OPTIMIZATION"]
 for focus in focus_order:
-    items = [r for r in recs if r["focus"] == focus]
-    if not items:
-        continue
-    for r in items:
+    for r in [x for x in recs if x["focus"] == focus]:
         st.markdown(
             '<div class="rec-card {}">'
             '<div class="rec-focus">◆ {}</div>'
@@ -912,7 +933,7 @@ if st.button("Run AI Analysis", use_container_width=True):
             battery_kwh=snap.system.battery_kwh,
             monthly_units=snap.grid_import,
             avg_consumption=hist["avg_consumption"],
-            avg_solar_gen=hist["avg_solar_gen"],
+            est_solar_gen=hist["est_solar_gen"],
             avg_solar_used=hist["avg_solar_used"],
         )
 if st.session_state.ai_result:
@@ -924,8 +945,8 @@ if st.session_state.ai_result:
 st.markdown("---")
 st.markdown(
     "<p style='text-align:center; color:#8B949E; font-size:0.8rem;'>"
-    "Home Energy Manager v2.1 | Captive solar (no export) | "
-    "Editable appliances | 14-month history | Direct Groq API"
+    "Home Energy Manager v2.2 | Captive solar (no export) | "
+    "Solar generation estimated | 14-month history | Groq gpt-oss-120b"
     "</p>",
     unsafe_allow_html=True,
 )
