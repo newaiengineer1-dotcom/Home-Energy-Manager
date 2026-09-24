@@ -2,29 +2,27 @@
 Home Energy Management Dashboard
 LESCO Protected Consumer Optimizer - September 2026
 
-The app auto-calibrates the tariff structure from the user's
-previous-year monthly kWh and/or monthly PKR bills.
-No manual entry of tariffs, rates, or thresholds required.
+Single-file app: dashboard + auto-calibrated tariff + direct Groq AI.
 """
 import os
-
-# --- Bridge Streamlit secrets to os.environ (required for CrewAI/litellm) ---
-try:
-    for _k in ("GROQ_API_KEY",):
-        if _k in st.secrets and not os.environ.get(_k):
-            os.environ[_k] = str(st.secrets[_k]).strip()
-except Exception:
-    pass
-# ---------------------------------------------------------------------------
-"""
-import os
+import requests
 import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
 from dataclasses import dataclass, field
 
 # =============================================================
-# 1. INTERNAL DEFAULTS (used only as fallback when no history)
+# SECRETS BRIDGE: st.secrets -> os.environ
+# =============================================================
+try:
+    for _k in ("GROQ_API_KEY",):
+        if _k in st.secrets and not os.environ.get(_k):
+            os.environ[_k] = str(st.secrets[_k]).strip()
+except Exception:
+    pass
+
+# =============================================================
+# CONFIG
 # =============================================================
 DEFAULT_PROTECTED_LIMIT = 200.0
 DEFAULT_PROTECTED_RATE = 13.40
@@ -37,6 +35,9 @@ DAY_LOAD_RATIO = 0.60
 BATTERY_EFFICIENCY = 0.85
 BATTERY_SHIFT_LIMIT = 0.40
 EXPORT_RATE = 11.0
+
+GROQ_MODEL = "openai/gpt-oss-120b"
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -59,7 +60,7 @@ DEFAULT_APPLIANCES = [
 ]
 
 # =============================================================
-# 2. DATA MODELS
+# DATA MODELS
 # =============================================================
 @dataclass
 class Appliance:
@@ -90,12 +91,11 @@ class Tariff:
     unprotected_rate: float = DEFAULT_UNPROTECTED_RATE
     calibrated: bool = False
     source: str = "defaults"
-    confidence: str = "low"
 
     def bill_for(self, units: float) -> dict:
         if units <= 0:
-            return {"total": 0, "per_unit": 0,
-                    "p_units": 0, "u_units": 0, "p_cost": 0, "u_cost": 0}
+            return {"total": 0, "per_unit": 0, "p_units": 0,
+                    "u_units": 0, "p_cost": 0, "u_cost": 0}
         p_units = min(units, self.protected_limit)
         u_units = max(0.0, units - self.protected_limit)
         p_cost = p_units * self.protected_rate
@@ -130,7 +130,7 @@ class Snapshot:
     bill: dict = field(default_factory=dict)
 
 # =============================================================
-# 3. AUTO-CALIBRATION
+# AUTO-CALIBRATION
 # =============================================================
 def _parse_csv(text: str) -> list:
     if not text:
@@ -152,14 +152,12 @@ def calibrate_tariff(kwh_csv: str, bill_csv: str) -> Tariff:
     t = Tariff()
     kwh = _parse_csv(kwh_csv)
     bills = _parse_csv(bill_csv)
-
     has_kwh = len(kwh) >= 3
     has_bills = len(bills) >= 3
 
     if has_kwh and has_bills and len(kwh) == len(bills):
         rates = [(b / k) if k > 0 else 0.0 for k, b in zip(kwh, bills)]
         pairs = sorted(zip(kwh, rates))
-
         max_jump, threshold = 0.0, DEFAULT_PROTECTED_LIMIT
         for i in range(1, len(pairs)):
             u_prev, r_prev = pairs[i - 1]
@@ -169,61 +167,101 @@ def calibrate_tariff(kwh_csv: str, bill_csv: str) -> Tariff:
                 if jump > max_jump:
                     max_jump = jump
                     threshold = (u_prev + u_curr) / 2.0
-
         protected = [r for u, r in pairs if u <= threshold and r > 0]
         unprotected = [r for u, r in pairs if u > threshold and r > 0]
-
         if protected:
             t.protected_rate = round(sum(protected) / len(protected), 2)
         if unprotected:
             t.unprotected_rate = round(sum(unprotected) / len(unprotected), 2)
-
         t.protected_limit = round(threshold)
         t.calibrated = True
         t.source = "calibrated from {} months".format(len(kwh))
-        t.confidence = "high" if len(kwh) >= 8 else "medium"
-
     elif has_kwh and not has_bills:
         t.source = "defaults (kWh history: {} months)".format(len(kwh))
-        t.confidence = "low"
-
     elif has_bills and not has_kwh:
         avg_bill = sum(bills) / len(bills)
         t.source = "defaults (avg bill: PKR {:,.0f})".format(avg_bill)
-        t.confidence = "low"
-
     return t
 
 # =============================================================
-# 4. ENERGY COMPUTATION
+# ENERGY COMPUTATION
 # =============================================================
 def build_snapshot(appliances, system, tariff):
     s = Snapshot(appliances=appliances, system=system, tariff=tariff)
-
     s.total_daily_kwh = sum(a.daily_kwh for a in appliances)
     s.total_monthly_kwh = s.total_daily_kwh * 30
-
     s.solar_monthly_kwh = system.solar_kwp * LAHORE_PEAK_SUN_HOURS * 30
     day_load = s.total_monthly_kwh * DAY_LOAD_RATIO
     s.solar_self_consumed = min(s.solar_monthly_kwh, day_load)
     s.solar_export = max(0.0, s.solar_monthly_kwh - s.solar_self_consumed)
     s.export_credit = s.solar_export * EXPORT_RATE
-
     s.grid_before_battery = max(0.0, s.total_monthly_kwh - s.solar_self_consumed)
-
     raw_shift = system.battery_kwh * 30 * BATTERY_EFFICIENCY
     s.battery_shifted = min(raw_shift, s.grid_before_battery * BATTERY_SHIFT_LIMIT)
-
     s.grid_after_battery = max(0.0, s.grid_before_battery - s.battery_shifted)
-
     s.is_protected = s.grid_after_battery <= tariff.protected_limit
     s.remaining = tariff.protected_limit - s.grid_after_battery
-
     s.bill = tariff.bill_for(s.grid_after_battery)
     return s
 
 # =============================================================
-# 5. PAGE CONFIG + CSS
+# AI ADVISOR (direct Groq API — no CrewAI/litellm)
+# =============================================================
+def run_ai_advisor(appliance_summary: str, solar_kwp: float,
+                   battery_kwh: float, monthly_units: float) -> str:
+    api_key = os.environ.get("GROQ_API_KEY", "").strip()
+    if not api_key:
+        return ("AI advisor is disabled. Add GROQ_API_KEY to your "
+                "Streamlit Secrets to enable.")
+
+    system_prompt = (
+        "You are an expert energy advisor for a household in Lahore, Pakistan. "
+        "The household is on the LESCO protected-consumer tariff, which requires "
+        "monthly grid import to stay under 200 units. "
+        "Give concise, actionable advice in plain text. No markdown headers."
+    )
+    user_prompt = (
+        "Appliance load: {}. Current solar: {} kWp. Current battery: {} kWh. "
+        "Current monthly grid import: {:.0f} units. "
+        "1. Predict month-end units. "
+        "2. Is the household at risk of exceeding 200 units? "
+        "3. Recommend specific actions to stay under the threshold."
+    ).format(appliance_summary, solar_kwp, battery_kwh, monthly_units)
+
+    try:
+        response = requests.post(
+            GROQ_API_URL,
+            headers={
+                "Authorization": "Bearer " + api_key,
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": GROQ_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.7,
+                "max_tokens": 1024,
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["choices"][0]["message"]["content"]
+    except requests.exceptions.HTTPError as e:
+        code = e.response.status_code if e.response is not None else 0
+        if code == 401:
+            return ("Invalid API Key. Check GROQ_API_KEY in Streamlit Secrets. "
+                    "Create a fresh key at https://console.groq.com/keys")
+        if code == 429:
+            return "Rate limit reached. Wait 60 seconds and try again."
+        return "AI analysis failed: HTTP {}".format(code)
+    except Exception as e:
+        return "AI analysis failed: {}".format(e)
+
+# =============================================================
+# PAGE CONFIG + CSS
 # =============================================================
 st.set_page_config(
     page_title="Home Energy Manager",
@@ -268,7 +306,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =============================================================
-# 6. SESSION STATE
+# SESSION STATE
 # =============================================================
 if "appliances" not in st.session_state:
     st.session_state.appliances = [dict(a) for a in DEFAULT_APPLIANCES]
@@ -284,7 +322,7 @@ if "ai_result" not in st.session_state:
     st.session_state.ai_result = ""
 
 # =============================================================
-# 7. SIDEBAR
+# SIDEBAR
 # =============================================================
 with st.sidebar:
     st.markdown("## Appliance Manager")
@@ -343,7 +381,6 @@ with st.sidebar:
         "Paste last 12 months of consumption and/or bills. "
         "The app auto-derives the effective tariff."
     )
-
     st.session_state.hist_kwh = st.text_area(
         "Monthly kWh (12 comma-separated values)",
         value=st.session_state.hist_kwh,
@@ -358,7 +395,7 @@ with st.sidebar:
     )
 
 # =============================================================
-# 8. BUILD SNAPSHOT
+# BUILD SNAPSHOT
 # =============================================================
 appliances = [Appliance(**a) for a in st.session_state.appliances]
 system = SystemConfig(
@@ -369,7 +406,7 @@ tariff = calibrate_tariff(st.session_state.hist_kwh, st.session_state.hist_bill)
 snap = build_snapshot(appliances, system, tariff)
 
 # =============================================================
-# 9. HEADER
+# HEADER
 # =============================================================
 st.markdown('<div class="main-header">Home Energy Management Dashboard</div>',
             unsafe_allow_html=True)
@@ -382,8 +419,7 @@ st.markdown(
 badge_class = "tariff-badge tariff-badge-ok" if tariff.calibrated else "tariff-badge"
 badge_prefix = "OK " if tariff.calibrated else "DEFAULTS "
 badge_text = (
-    badge_prefix
-    + "Tariff: " + tariff.source
+    badge_prefix + "Tariff: " + tariff.source
     + " | Protected <=" + str(int(tariff.protected_limit))
     + " @ PKR " + str(tariff.protected_rate) + "/unit"
     + " | Unprotected @ PKR " + str(tariff.unprotected_rate) + "/unit"
@@ -396,7 +432,7 @@ st.markdown(
 st.markdown("---")
 
 # =============================================================
-# 10. KPI CARDS
+# KPI CARDS
 # =============================================================
 c1, c2, c3, c4 = st.columns(4)
 with c1:
@@ -414,7 +450,7 @@ with c4:
               delta="~{:.0f} units shifted".format(snap.battery_shifted))
 
 # =============================================================
-# 11. THRESHOLD GAUGE
+# THRESHOLD GAUGE
 # =============================================================
 st.markdown("### Protected Status Threshold (<={:.0f} units)".format(tariff.protected_limit))
 col_g, col_i = st.columns([2, 1])
@@ -454,7 +490,7 @@ with col_i:
         st.error("EXCEEDED by {:.0f} units".format(abs(snap.remaining)))
 
 # =============================================================
-# 12. SANKEY
+# SANKEY
 # =============================================================
 st.markdown("### Energy Flow")
 fig_s = go.Figure(go.Sankey(
@@ -478,7 +514,7 @@ fig_s.update_layout(height=350, paper_bgcolor="rgba(0,0,0,0)",
 st.plotly_chart(fig_s, use_container_width=True)
 
 # =============================================================
-# 13. DONUT + HISTORICAL TREND
+# DONUT + TREND
 # =============================================================
 c_left, c_right = st.columns(2)
 
@@ -497,7 +533,6 @@ with c_left:
 
 with c_right:
     st.markdown("### Previous Year Consumption Trend")
-
     hist_kwh = _parse_csv(st.session_state.hist_kwh)
     hist_bill = _parse_csv(st.session_state.hist_bill)
 
@@ -539,7 +574,7 @@ with c_right:
         st.info("Enter previous-year monthly kWh in the sidebar to see trends.")
 
 # =============================================================
-# 14. ACTION CARDS
+# ACTION CARDS
 # =============================================================
 st.markdown("---")
 st.markdown("### Recommended Actions")
@@ -555,8 +590,7 @@ if snap.remaining > 20:
 elif snap.remaining > 0:
     st.markdown(
         '<div class="action-card action-card-warning">'
-        '<b>Caution: {:.0f} units remaining.</b> '
-        'Take these actions immediately:'
+        '<b>Caution: {:.0f} units remaining.</b> Take these actions immediately:'
         '</div>'.format(snap.remaining),
         unsafe_allow_html=True,
     )
@@ -570,8 +604,7 @@ elif snap.remaining > 0:
 else:
     st.markdown(
         '<div class="action-card action-card-danger">'
-        '<b>EXCEEDED by {:.0f} units!</b> '
-        'Immediate action required:'
+        '<b>EXCEEDED by {:.0f} units!</b> Immediate action required:'
         '</div>'.format(abs(snap.remaining)),
         unsafe_allow_html=True,
     )
@@ -593,7 +626,7 @@ st.warning(
 )
 
 # =============================================================
-# 15. BILL BREAKDOWN
+# BILL BREAKDOWN
 # =============================================================
 st.markdown("### Bill Breakdown")
 b = snap.bill
@@ -629,38 +662,34 @@ if snap.solar_export > 0:
     )
 
 # =============================================================
-# 16. AI INSIGHTS
+# AI INSIGHTS
 # =============================================================
 st.markdown("---")
-st.markdown("### AI Energy Advisor (Groq / gpt-oss-120b)")
+st.markdown("### AI Energy Advisor (Groq / openai/gpt-oss-120b)")
 
-try:
-    from agents import run_energy_analysis
-    if st.button("Run AI Analysis", use_container_width=True):
-        summary = ", ".join(
-            "{} ({}W x {} x {}h)".format(a.name, a.watts, a.qty, a.hours)
-            for a in snap.appliances
+if st.button("Run AI Analysis", use_container_width=True):
+    summary = ", ".join(
+        "{} ({}W x {} x {}h)".format(a.name, a.watts, a.qty, a.hours)
+        for a in snap.appliances
+    )
+    with st.spinner("Asking Groq..."):
+        st.session_state.ai_result = run_ai_advisor(
+            appliance_summary=summary,
+            solar_kwp=snap.system.solar_kwp,
+            battery_kwh=snap.system.battery_kwh,
+            monthly_units=snap.grid_after_battery,
         )
-        with st.spinner("Agents are analyzing your setup..."):
-            st.session_state.ai_result = run_energy_analysis(
-                appliance_data=summary,
-                solar_kwp=snap.system.solar_kwp,
-                battery_kwh=snap.system.battery_kwh,
-                monthly_units=snap.grid_after_battery,
-            )
-    if st.session_state.ai_result:
-        st.markdown(st.session_state.ai_result)
-except ImportError:
-    st.caption("AI advisor disabled - add agents.py to enable.")
+if st.session_state.ai_result:
+    st.markdown(st.session_state.ai_result)
 
 # =============================================================
-# 17. FOOTER
+# FOOTER
 # =============================================================
 st.markdown("---")
 st.markdown(
     "<p style='text-align:center; color:#8B949E; font-size:0.8rem;'>"
-    "Home Energy Manager v1.1 | Auto-calibrated tariff | "
-    "Net Billing (NEPRA Feb 2026) | Streamlit + Plotly + CrewAI + Groq"
+    "Home Energy Manager v1.2 | Auto-calibrated tariff | "
+    "Direct Groq API | Streamlit + Plotly"
     "</p>",
     unsafe_allow_html=True,
 )
