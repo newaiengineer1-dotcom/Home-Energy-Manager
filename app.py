@@ -3,6 +3,7 @@ Home Energy Management Dashboard
 LESCO Protected Consumer Optimizer - September 2026
 
 Single-file app: dashboard + auto-calibrated tariff + direct Groq AI.
+Battery is charged ONLY by solar surplus - NEVER by LESCO grid.
 """
 import os
 import requests
@@ -31,10 +32,9 @@ DEFAULT_SOLAR_KWP = 5.0
 DEFAULT_BATTERY_KWH = 10.0
 
 LAHORE_PEAK_SUN_HOURS = 5.2
-DAY_LOAD_RATIO = 0.60
-BATTERY_EFFICIENCY = 0.85
-BATTERY_SHIFT_LIMIT = 0.40
-EXPORT_RATE = 11.0
+DAY_LOAD_RATIO = 0.60           # 60% of daily load occurs during solar hours
+BATTERY_EFFICIENCY = 0.85       # round-trip efficiency (LiFePO4 typical)
+EXPORT_RATE = 11.0              # PKR/unit - Net Billing 2026
 
 GROQ_MODEL = "openai/gpt-oss-120b"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -53,9 +53,9 @@ COLORS = {
 # =============================================================
 # DEFAULT APPLIANCES - Your setup (September 2026)
 # -------------------------------------------------------------
-# - 2 x Inverter AC 1.5 Ton Waves  @ 26 degrees C, 1200W running
-# - 1 x Inverter AC 1.0 Ton        @ 26 degrees C,  900W running
-# - 1 x Inverter Refrigerator PEL  @ 24h/day,       150W average
+# - 2 x Inverter AC 1.5 Ton Waves @ 26 degrees C (1200W running)
+# - 1 x Inverter AC 1.0 Ton       @ 26 degrees C (900W running)
+# - 1 x Inverter Refrigerator PEL (150W average, 24h/day)
 # =============================================================
 DEFAULT_APPLIANCES = [
     {"name": "Inverter AC 1.5 Ton (Waves) #1", "watts": 1200, "hours": 8.0, "qty": 1},
@@ -121,15 +121,21 @@ class Snapshot:
     appliances: list
     system: SystemConfig
     tariff: Tariff
+    # Load
     total_daily_kwh: float = 0.0
     total_monthly_kwh: float = 0.0
+    # Solar
+    solar_daily_kwh: float = 0.0
     solar_monthly_kwh: float = 0.0
-    solar_self_consumed: float = 0.0
-    solar_export: float = 0.0
+    solar_direct_monthly: float = 0.0        # consumed directly during day
+    solar_to_battery_monthly: float = 0.0    # charged into battery
+    solar_export_monthly: float = 0.0        # exported to grid
     export_credit: float = 0.0
-    battery_shifted: float = 0.0
-    grid_before_battery: float = 0.0
-    grid_after_battery: float = 0.0
+    # Battery
+    battery_discharge_monthly: float = 0.0   # usable output to home
+    # Grid
+    grid_import: float = 0.0                 # final billable units
+    # Status
     is_protected: bool = False
     remaining: float = 0.0
     bill: dict = field(default_factory=dict)
@@ -190,27 +196,68 @@ def calibrate_tariff(kwh_csv: str, bill_csv: str) -> Tariff:
 
 # =============================================================
 # ENERGY COMPUTATION
+# -------------------------------------------------------------
+# Battery is charged ONLY from solar surplus (never from grid).
+#
+# Daily flow:
+#   1. Solar covers day-load first (solar_direct)
+#   2. Remaining solar surplus charges battery (capped by battery kWh)
+#   3. Excess solar beyond battery capacity is exported
+#   4. Battery discharges to cover night-load (after round-trip losses)
+#   5. Grid covers whatever solar-direct + battery cannot
 # =============================================================
 def build_snapshot(appliances, system, tariff):
     s = Snapshot(appliances=appliances, system=system, tariff=tariff)
+
+    # ---- Load ----
     s.total_daily_kwh = sum(a.daily_kwh for a in appliances)
     s.total_monthly_kwh = s.total_daily_kwh * 30
-    s.solar_monthly_kwh = system.solar_kwp * LAHORE_PEAK_SUN_HOURS * 30
-    day_load = s.total_monthly_kwh * DAY_LOAD_RATIO
-    s.solar_self_consumed = min(s.solar_monthly_kwh, day_load)
-    s.solar_export = max(0.0, s.solar_monthly_kwh - s.solar_self_consumed)
-    s.export_credit = s.solar_export * EXPORT_RATE
-    s.grid_before_battery = max(0.0, s.total_monthly_kwh - s.solar_self_consumed)
-    raw_shift = system.battery_kwh * 30 * BATTERY_EFFICIENCY
-    s.battery_shifted = min(raw_shift, s.grid_before_battery * BATTERY_SHIFT_LIMIT)
-    s.grid_after_battery = max(0.0, s.grid_before_battery - s.battery_shifted)
-    s.is_protected = s.grid_after_battery <= tariff.protected_limit
-    s.remaining = tariff.protected_limit - s.grid_after_battery
-    s.bill = tariff.bill_for(s.grid_after_battery)
+
+    # ---- Daily solar ----
+    s.solar_daily_kwh = system.solar_kwp * LAHORE_PEAK_SUN_HOURS
+    s.solar_monthly_kwh = s.solar_daily_kwh * 30
+
+    # ---- Split load into day/night portions ----
+    day_load = s.total_daily_kwh * DAY_LOAD_RATIO
+    night_load = s.total_daily_kwh * (1.0 - DAY_LOAD_RATIO)
+
+    # ---- 1. Solar used directly during day ----
+    solar_direct = min(s.solar_daily_kwh, day_load)
+
+    # ---- 2. Solar surplus available for battery ----
+    solar_surplus = max(0.0, s.solar_daily_kwh - solar_direct)
+
+    # Battery can only absorb up to its rated capacity per day
+    battery_charge = min(solar_surplus, system.battery_kwh)
+
+    # ---- 3. Surplus beyond battery goes to export ----
+    solar_export = solar_surplus - battery_charge
+
+    # ---- 4. Battery usable output after round-trip losses ----
+    battery_usable = battery_charge * BATTERY_EFFICIENCY
+    battery_discharge = min(battery_usable, night_load)
+
+    # ---- 5. Grid covers the rest ----
+    grid_daily = max(0.0, s.total_daily_kwh - solar_direct - battery_discharge)
+
+    # ---- Monthly aggregates ----
+    s.solar_direct_monthly = solar_direct * 30
+    s.solar_to_battery_monthly = battery_charge * 30
+    s.solar_export_monthly = solar_export * 30
+    s.export_credit = s.solar_export_monthly * EXPORT_RATE
+    s.battery_discharge_monthly = battery_discharge * 30
+    s.grid_import = grid_daily * 30
+
+    # ---- Protected status ----
+    s.is_protected = s.grid_import <= tariff.protected_limit
+    s.remaining = tariff.protected_limit - s.grid_import
+
+    # ---- Bill ----
+    s.bill = tariff.bill_for(s.grid_import)
     return s
 
 # =============================================================
-# AI ADVISOR (direct Groq API - no CrewAI/litellm)
+# AI ADVISOR (direct Groq API)
 # =============================================================
 def run_ai_advisor(appliance_summary: str, solar_kwp: float,
                    battery_kwh: float, monthly_units: float) -> str:
@@ -221,16 +268,16 @@ def run_ai_advisor(appliance_summary: str, solar_kwp: float,
 
     system_prompt = (
         "You are an expert energy advisor for a household in Lahore, Pakistan. "
-        "The household is on the LESCO protected-consumer tariff, which requires "
-        "monthly grid import to stay under 200 units. "
-        "Give concise, actionable advice in plain text. No markdown headers."
+        "The household is on the LESCO protected-consumer tariff (under 200 "
+        "units/month). Their battery is charged ONLY by solar - never from the "
+        "grid. Give concise, actionable advice in plain text. No markdown headers."
     )
     user_prompt = (
-        "Appliance load: {}. Current solar: {} kWp. Current battery: {} kWh. "
-        "Current monthly grid import: {:.0f} units. "
+        "Appliance load: {}. Current solar: {} kWp. Current battery: {} kWh "
+        "(solar-charged only). Current monthly grid import: {:.0f} units. "
         "1. Predict month-end units. "
         "2. Is the household at risk of exceeding 200 units? "
-        "3. Recommend specific actions to stay under the threshold."
+        "3. Recommend specific solar/battery sizing or load-shifting actions."
     ).format(appliance_summary, solar_kwp, battery_kwh, monthly_units)
 
     try:
@@ -307,6 +354,15 @@ st.markdown("""
         background: rgba(63,185,80,0.15); color: #3FB950;
         border-color: rgba(63,185,80,0.35);
     }
+    .battery-note {
+        background: rgba(57,211,83,0.10);
+        border: 1px solid rgba(57,211,83,0.35);
+        border-radius: 10px;
+        padding: 0.6rem 0.9rem;
+        font-size: 0.82rem;
+        color: #39D353;
+        margin: 0.5rem 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -373,11 +429,19 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("## Solar & Battery")
+
+    st.markdown(
+        '<div class="battery-note">'
+        '🔋 <b>Battery is charged ONLY from solar surplus</b> — never from LESCO grid.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
     st.session_state.solar_kwp = st.slider(
-        "Solar PV System (kWp)", 0.0, 20.0, st.session_state.solar_kwp, 0.5,
+        "Solar PV System (kWp)", 0.0, 25.0, st.session_state.solar_kwp, 0.5,
     )
     st.session_state.battery_kwh = st.slider(
-        "Battery Capacity (kWh)", 0.0, 50.0, st.session_state.battery_kwh, 1.0,
+        "Battery Capacity (kWh)", 0.0, 60.0, st.session_state.battery_kwh, 1.0,
     )
 
     st.markdown("---")
@@ -417,7 +481,8 @@ st.markdown('<div class="main-header">Home Energy Management Dashboard</div>',
             unsafe_allow_html=True)
 st.markdown(
     "<p style='text-align:center; color:#8B949E;'>"
-    "September 2026 | LESCO Protected Consumer Optimizer</p>",
+    "September 2026 | LESCO Protected Consumer Optimizer | "
+    "Solar-only battery charging</p>",
     unsafe_allow_html=True,
 )
 
@@ -441,7 +506,7 @@ st.markdown("---")
 # =============================================================
 c1, c2, c3, c4 = st.columns(4)
 with c1:
-    st.metric("Monthly Grid Units", "{:.0f}".format(snap.grid_after_battery),
+    st.metric("Monthly Grid Units", "{:.0f}".format(snap.grid_import),
               delta="Protected" if snap.is_protected else "Unprotected",
               delta_color="normal" if snap.is_protected else "inverse")
 with c2:
@@ -449,10 +514,11 @@ with c2:
               delta="{:.2f} PKR/unit".format(snap.bill["per_unit"]))
 with c3:
     st.metric("Solar Generation", "{:.0f} kWh".format(snap.solar_monthly_kwh),
-              delta="{:.0f} self-consumed".format(snap.solar_self_consumed))
+              delta="{:.0f} direct + {:.0f} to battery".format(
+                  snap.solar_direct_monthly, snap.solar_to_battery_monthly))
 with c4:
-    st.metric("Battery Backup", "{:.0f} kWh".format(snap.system.battery_kwh),
-              delta="~{:.0f} units shifted".format(snap.battery_shifted))
+    st.metric("Battery Discharge", "{:.0f} kWh".format(snap.battery_discharge_monthly),
+              delta="charges only from solar")
 
 # =============================================================
 # THRESHOLD GAUGE
@@ -464,7 +530,7 @@ with col_g:
     gauge_max = max(300, tariff.protected_limit * 1.5)
     fig = go.Figure(go.Indicator(
         mode="gauge+number+delta",
-        value=snap.grid_after_battery,
+        value=snap.grid_import,
         number={"suffix": " units", "font": {"size": 40, "color": COLORS["primary"]}},
         delta={"reference": tariff.protected_limit,
                "increasing": {"color": COLORS["danger"]},
@@ -495,19 +561,29 @@ with col_i:
         st.error("EXCEEDED by {:.0f} units".format(abs(snap.remaining)))
 
 # =============================================================
-# SANKEY
+# SANKEY - energy flow (battery charged only from solar)
 # =============================================================
 st.markdown("### Energy Flow")
+st.caption("Battery receives charge ONLY from solar surplus - no grid-to-battery path.")
+
 fig_s = go.Figure(go.Sankey(
-    node=dict(pad=20, thickness=25,
-              line=dict(color=COLORS["border"], width=0.5),
-              label=["Grid Import", "Solar PV", "Battery", "Home Load", "Grid Export"],
-              color=[COLORS["primary"], COLORS["solar"], COLORS["battery"],
-                     COLORS["danger"], COLORS["muted"]]),
+    node=dict(
+        pad=20, thickness=25,
+        line=dict(color=COLORS["border"], width=0.5),
+        label=["Grid Import", "Solar PV", "Battery", "Home Load", "Grid Export"],
+        color=[COLORS["primary"], COLORS["solar"], COLORS["battery"],
+               COLORS["danger"], COLORS["muted"]],
+    ),
     link=dict(
-        source=[0, 1, 1, 2, 1], target=[3, 3, 2, 3, 4],
-        value=[snap.grid_after_battery, snap.solar_self_consumed * 0.6,
-               snap.solar_self_consumed * 0.4, snap.battery_shifted, snap.solar_export],
+        source=[0,   1,   1,   2,   1],
+        target=[3,   3,   2,   3,   4],
+        value=[
+            snap.grid_import,
+            snap.solar_direct_monthly,
+            snap.solar_to_battery_monthly,
+            snap.battery_discharge_monthly,
+            snap.solar_export_monthly,
+        ],
         color=["rgba(88,166,255,0.3)", "rgba(255,223,74,0.3)",
                "rgba(57,211,83,0.3)", "rgba(57,211,83,0.3)",
                "rgba(139,148,158,0.3)"],
@@ -600,12 +676,11 @@ elif snap.remaining > 0:
         unsafe_allow_html=True,
     )
     st.markdown("""
-    - Increase solar to reduce grid import - Each +1 kWp offsets ~110-150 units/month
-    - Add battery capacity - Each +5 kWh shifts ~4-6 units/day from grid to solar
-    - Shift AC usage to 10 AM-3 PM (solar peak) - your 3 ACs are the biggest load
+    - Increase solar kWp - Each +1 kWp offsets ~110-150 units/month
+    - Increase battery kWh - Each +5 kWh absorbs ~4-6 more surplus units/day
+    - Shift AC usage to 10 AM-3 PM (solar peak) - 3 ACs are your dominant load
     - Keep ACs at 26 degrees C or higher (you already are - good!)
     - Set AC sleep timers to 6 hours overnight instead of 8
-    - Switch to LED bulbs - saves 3-5 units/month
     """)
 else:
     st.markdown(
@@ -617,7 +692,7 @@ else:
     st.markdown("""
     - Reduce AC runtime immediately - 3 ACs are your dominant load
     - Add solar kWp urgently - Minimum 2 kWp additional recommended
-    - Maximize battery - Store solar for night use
+    - Increase battery - absorbs more solar surplus (never charged from grid)
     - Do NOT install a second meter - LESCO crackdown active since 2026
     - Check separate-family exception (separate kitchen + wiring required)
     """)
@@ -659,11 +734,11 @@ with bc[2]:
 with bc[3]:
     st.metric("Total Bill", "PKR {:,.0f}".format(b["total"]))
 
-if snap.solar_export > 0:
+if snap.solar_export_monthly > 0:
     st.info(
         "Net Billing Credit: Exported {:.0f} units at ~PKR {:.0f}/unit = "
         "PKR {:,.0f} credit (2026 Net Billing policy)".format(
-            snap.solar_export, EXPORT_RATE, snap.export_credit
+            snap.solar_export_monthly, EXPORT_RATE, snap.export_credit
         )
     )
 
@@ -683,7 +758,7 @@ if st.button("Run AI Analysis", use_container_width=True):
             appliance_summary=summary,
             solar_kwp=snap.system.solar_kwp,
             battery_kwh=snap.system.battery_kwh,
-            monthly_units=snap.grid_after_battery,
+            monthly_units=snap.grid_import,
         )
 if st.session_state.ai_result:
     st.markdown(st.session_state.ai_result)
@@ -694,8 +769,8 @@ if st.session_state.ai_result:
 st.markdown("---")
 st.markdown(
     "<p style='text-align:center; color:#8B949E; font-size:0.8rem;'>"
-    "Home Energy Manager v1.2 | Auto-calibrated tariff | "
-    "Direct Groq API | Streamlit + Plotly"
+    "Home Energy Manager v1.3 | Solar-only battery charging | "
+    "Auto-calibrated tariff | Direct Groq API | Streamlit + Plotly"
     "</p>",
     unsafe_allow_html=True,
 )
