@@ -2,13 +2,15 @@
 Home Energy Management Dashboard
 LESCO Protected Consumer | Captive Solar (No Export) | Sep 2026
 
-High-contrast theme. UI and layout unchanged from v3.0.
+Data window: Oct 2025 -> Sep 2026 (12 months)
+Modern graphics. High-contrast theme.
 """
 import os
 import json
 import requests
 import streamlit as st
 import pandas as pd
+import plotly.graph_objects as go
 from dataclasses import dataclass
 
 # =============================================================
@@ -31,11 +33,28 @@ PROTECTED_LIMIT = 200.0
 GROQ_MODEL = "openai/gpt-oss-120b"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
+# Data window: Oct 2025 -> Sep 2026 (12 months)
 MONTH_SEQ = [
-    "Aug-25", "Sep-25", "Oct-25", "Nov-25", "Dec-25",
-    "Jan-26", "Feb-26", "Mar-26", "Apr-26", "May-26",
-    "Jun-26", "Jul-26", "Aug-26", "Sep-26",
+    "Oct-25", "Nov-25", "Dec-25",
+    "Jan-26", "Feb-26", "Mar-26",
+    "Apr-26", "May-26", "Jun-26",
+    "Jul-26", "Aug-26", "Sep-26",
 ]
+
+COLORS = {
+    "bg":     "#0D1117",
+    "bg2":    "#161B22",
+    "border": "#30363D",
+    "text":   "#F0F6FC",
+    "muted":  "#8B949E",
+    "primary":"#58A6FF",
+    "success":"#3FB950",
+    "warning":"#D29922",
+    "danger": "#F85149",
+    "solar":  "#FFDF4A",
+    "battery":"#39D353",
+    "grid":   "#58A6FF",
+}
 
 DEFAULT_APPLIANCES = [
     {"name": "Inverter AC 1.5T @26C (2x/week, 6h)", "watts": 550,  "hours": 6.0,  "days_per_week": 2, "qty": 1},
@@ -110,6 +129,277 @@ def _fmt_history_table(df):
 
 
 # =============================================================
+# MODERN CHART BUILDERS
+# =============================================================
+def _modern_axis_style():
+    return dict(
+        showgrid=True,
+        gridcolor="rgba(48,54,61,0.5)",
+        gridwidth=1,
+        zeroline=False,
+        tickfont=dict(color=COLORS["text"], size=11),
+        title_font=dict(color=COLORS["muted"], size=12),
+        linecolor=COLORS["border"],
+    )
+
+
+def _base_layout(height=380, title=None):
+    layout = dict(
+        height=height,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=COLORS["text"], family="-apple-system, sans-serif"),
+        margin=dict(l=20, r=20, t=50 if title else 25, b=20),
+        hoverlabel=dict(
+            bgcolor=COLORS["bg2"],
+            bordercolor=COLORS["primary"],
+            font=dict(color=COLORS["text"], size=12),
+        ),
+    )
+    if title:
+        layout["title"] = dict(
+            text=title, font=dict(color=COLORS["text"], size=15, weight="bold"),
+            x=0.0, xanchor="left",
+        )
+    return layout
+
+
+def chart_gauge(value, limit):
+    """Modern gauge with gradient-style steps and clear threshold."""
+    gauge_max = max(300, limit * 1.5)
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number+delta",
+        value=value,
+        number={
+            "suffix": " units",
+            "font": {"size": 44, "color": COLORS["primary"], "family": "-apple-system"},
+        },
+        delta={
+            "reference": limit,
+            "increasing": {"color": COLORS["danger"]},
+            "decreasing": {"color": COLORS["success"]},
+            "font": {"size": 16},
+        },
+        gauge={
+            "axis": {
+                "range": [0, gauge_max],
+                "tickcolor": COLORS["muted"],
+                "tickfont": {"size": 10, "color": COLORS["muted"]},
+                "tickwidth": 1,
+            },
+            "bar": {"color": COLORS["primary"], "thickness": 0.28},
+            "bgcolor": "rgba(0,0,0,0)",
+            "borderwidth": 0,
+            "steps": [
+                {"range": [0, limit * 0.75],        "color": "rgba(63,185,80,0.18)"},
+                {"range": [limit * 0.75, limit],    "color": "rgba(210,153,34,0.22)"},
+                {"range": [limit, gauge_max],       "color": "rgba(248,81,73,0.22)"},
+            ],
+            "threshold": {
+                "line": {"color": COLORS["danger"], "width": 3},
+                "thickness": 0.85,
+                "value": limit,
+            },
+        },
+    ))
+    fig.update_layout(**_base_layout(height=290))
+    return fig
+
+
+def chart_monthly_stacked(history_df):
+    """Modern stacked bar: Solar Used vs LESCO Import per month."""
+    df = history_df.copy()
+    df["solar_used"] = pd.to_numeric(df.get("Solar Used (kWh)"), errors="coerce")
+    df["lesco"] = pd.to_numeric(df.get("LESCO Import (kWh)"), errors="coerce")
+    df["cons"] = pd.to_numeric(df.get("Consumption (kWh)"), errors="coerce")
+
+    # Fallback: if user only entered consumption, split visually
+    if df["solar_used"].isna().all() and df["lesco"].isna().all():
+        df["lesco"] = df["cons"]
+        df["solar_used"] = 0
+    df = df.fillna(0)
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=df["Month"], y=df["solar_used"],
+        name="Solar Used",
+        marker=dict(
+            color=COLORS["solar"],
+            line=dict(color="rgba(255,223,74,0.9)", width=0),
+        ),
+        hovertemplate="<b>%{x}</b><br>Solar Used: %{y:.0f} kWh<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        x=df["Month"], y=df["lesco"],
+        name="LESCO Import",
+        marker=dict(
+            color=COLORS["primary"],
+            line=dict(color="rgba(88,166,255,0.9)", width=0),
+        ),
+        hovertemplate="<b>%{x}</b><br>LESCO Import: %{y:.0f} kWh<extra></extra>",
+    ))
+    fig.add_hline(
+        y=PROTECTED_LIMIT,
+        line=dict(color=COLORS["danger"], width=2, dash="dash"),
+        annotation_text="Protected Limit · 200 kWh",
+        annotation_position="top right",
+        annotation_font=dict(color=COLORS["danger"], size=11),
+    )
+    layout = _base_layout(height=400, title="12-Month Energy Breakdown")
+    layout["barmode"] = "stack"
+    layout["bargap"] = 0.35
+    layout["xaxis"] = _modern_axis_style()
+    layout["yaxis"] = dict(**_modern_axis_style(), title="kWh")
+    layout["legend"] = dict(
+        orientation="h", y=1.12, x=0,
+        bgcolor="rgba(0,0,0,0)",
+        font=dict(color=COLORS["text"], size=11),
+    )
+    fig.update_layout(**layout)
+    return fig
+
+
+def chart_solar_utilization(history_df):
+    """Modern grouped bar: Generated vs Used."""
+    df = history_df.copy()
+    df["gen"] = pd.to_numeric(df.get("Solar Gen (kWh)"), errors="coerce")
+    df["used"] = pd.to_numeric(df.get("Solar Used (kWh)"), errors="coerce")
+    df = df.dropna(subset=["gen", "used"], how="all").fillna(0)
+    if df.empty:
+        return None
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=df["Month"], y=df["gen"], name="Generated",
+        marker=dict(color="rgba(255,223,74,0.35)",
+                    line=dict(color=COLORS["solar"], width=1.5)),
+        hovertemplate="<b>%{x}</b><br>Generated: %{y:.0f} kWh<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        x=df["Month"], y=df["used"], name="Used On-site",
+        marker=dict(color=COLORS["success"],
+                    line=dict(color="rgba(63,185,80,0.9)", width=0)),
+        hovertemplate="<b>%{x}</b><br>Used: %{y:.0f} kWh<extra></extra>",
+    ))
+    layout = _base_layout(height=340, title="Solar Generation vs Utilization")
+    layout["barmode"] = "group"
+    layout["bargap"] = 0.3
+    layout["bargroupgap"] = 0.1
+    layout["xaxis"] = _modern_axis_style()
+    layout["yaxis"] = dict(**_modern_axis_style(), title="kWh")
+    layout["legend"] = dict(
+        orientation="h", y=1.12, x=0,
+        bgcolor="rgba(0,0,0,0)",
+        font=dict(color=COLORS["text"], size=11),
+    )
+    fig.update_layout(**layout)
+    return fig
+
+
+def chart_bill_trend(history_df):
+    """Modern line chart: Bill (PKR) with area fill."""
+    df = history_df.copy()
+    df["bill"] = pd.to_numeric(df.get("Bill (PKR)"), errors="coerce")
+    df = df.dropna(subset=["bill"])
+    if df.empty:
+        return None
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df["Month"], y=df["bill"],
+        mode="lines+markers",
+        name="Bill",
+        line=dict(color=COLORS["warning"], width=3, shape="spline", smoothing=0.9),
+        marker=dict(size=9, color=COLORS["warning"],
+                    line=dict(color=COLORS["text"], width=1.5)),
+        fill="tozeroy",
+        fillcolor="rgba(210,153,34,0.15)",
+        hovertemplate="<b>%{x}</b><br>Bill: PKR %{y:,.0f}<extra></extra>",
+    ))
+    layout = _base_layout(height=340, title="Monthly Bill Trend (PKR)")
+    layout["xaxis"] = _modern_axis_style()
+    layout["yaxis"] = dict(**_modern_axis_style(), title="PKR")
+    layout["showlegend"] = False
+    fig.update_layout(**layout)
+    return fig
+
+
+def chart_appliance_modern(app_df):
+    """Modern donut with legend, no clutter."""
+    labels = app_df["Appliance"].tolist()
+    values = app_df["kWh/Month"].tolist()
+
+    palette = [
+        "#58A6FF", "#3FB950", "#FFDF4A", "#F85149", "#D29922",
+        "#A371F7", "#39D353", "#FF7B72", "#79C0FF", "#F0883E",
+        "#7EE787",
+    ]
+    fig = go.Figure(go.Pie(
+        labels=labels,
+        values=values,
+        hole=0.58,
+        marker=dict(
+            colors=palette[:len(labels)],
+            line=dict(color=COLORS["bg"], width=2),
+        ),
+        textinfo="percent",
+        textposition="inside",
+        insidetextorientation="horizontal",
+        textfont=dict(color="#0D1117", size=11, family="-apple-system"),
+        hovertemplate="<b>%{label}</b><br>%{value:.1f} kWh/mo<br>%{percent}<extra></extra>",
+        sort=True,
+    ))
+    layout = _base_layout(height=420, title="Appliance Monthly Consumption")
+    layout["showlegend"] = True
+    layout["legend"] = dict(
+        orientation="v",
+        yanchor="middle", y=0.5,
+        xanchor="left", x=1.02,
+        bgcolor="rgba(0,0,0,0)",
+        font=dict(color=COLORS["text"], size=11),
+    )
+    layout["margin"] = dict(l=10, r=10, t=50, b=10)
+    fig.update_layout(**layout)
+    return fig
+
+
+def chart_consumption_line(history_df, appliance_estimate):
+    """Modern smooth line of past consumption vs appliance estimate."""
+    df = history_df.copy()
+    df["cons"] = pd.to_numeric(df.get("Consumption (kWh)"), errors="coerce")
+    df = df.dropna(subset=["cons"])
+    if df.empty:
+        return None
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df["Month"], y=df["cons"],
+        mode="lines+markers",
+        name="Metered Consumption",
+        line=dict(color=COLORS["primary"], width=3,
+                  shape="spline", smoothing=0.9),
+        marker=dict(size=10, color=COLORS["primary"],
+                    line=dict(color="#FFFFFF", width=1.5)),
+        fill="tozeroy",
+        fillcolor="rgba(88,166,255,0.12)",
+        hovertemplate="<b>%{x}</b><br>Consumption: %{y:.0f} kWh<extra></extra>",
+    ))
+    fig.add_hline(
+        y=appliance_estimate,
+        line=dict(color=COLORS["warning"], width=2, dash="dot"),
+        annotation_text="Appliance Est. · {:.0f} kWh".format(appliance_estimate),
+        annotation_position="top right",
+        annotation_font=dict(color=COLORS["warning"], size=11),
+    )
+    layout = _base_layout(height=340, title="Metered Consumption Trend")
+    layout["xaxis"] = _modern_axis_style()
+    layout["yaxis"] = dict(**_modern_axis_style(), title="kWh")
+    layout["showlegend"] = False
+    fig.update_layout(**layout)
+    return fig
+
+
+# =============================================================
 # LLM CALL
 # =============================================================
 def call_llm_analysis(solar_kwp, battery_kwh, appliances_df, history_df):
@@ -146,7 +436,7 @@ APPLIANCES
 
 APPLIANCE MONTHLY ESTIMATE: {appl:.0f} kWh
 
-14-MONTH HISTORY (Aug 2025 - Sep 2026)
+12-MONTH HISTORY (Oct 2025 - Sep 2026)
 {history}
 
 TASKS
@@ -212,27 +502,18 @@ st.set_page_config(page_title="Home Energy Manager", page_icon="⚡",
                    layout="wide", initial_sidebar_state="expanded")
 
 # -------------------------------------------------------------
-# HIGH-CONTRAST CSS — only this block changed from v3.0
+# HIGH-CONTRAST CSS (identical to v3.1)
 # -------------------------------------------------------------
 st.markdown("""
 <style>
-    /* ---------- GLOBAL ---------- */
     .stApp {
         background: linear-gradient(135deg, #0D1117 0%, #161B22 100%);
         color: #F0F6FC !important;
     }
-    html, body, [class*="css"] {
-        color: #F0F6FC !important;
-    }
-    p, span, div, label, li, td, th {
-        color: #F0F6FC !important;
-    }
-    h1, h2, h3, h4, h5, h6 {
-        color: #FFFFFF !important;
-        font-weight: 700 !important;
-    }
+    html, body, [class*="css"] { color: #F0F6FC !important; }
+    p, span, div, label, li, td, th { color: #F0F6FC !important; }
+    h1, h2, h3, h4, h5, h6 { color: #FFFFFF !important; font-weight: 700 !important; }
 
-    /* ---------- HEADER ---------- */
     .main-header {
         font-size: 2.4rem; font-weight: 800;
         background: linear-gradient(90deg, #58A6FF, #3FB950, #FFDF4A);
@@ -241,16 +522,12 @@ st.markdown("""
         text-align: center; padding: 1rem 0;
     }
 
-    /* ---------- SIDEBAR ---------- */
     section[data-testid="stSidebar"] {
         background: #0D1117 !important;
         border-right: 1px solid #30363D;
     }
-    section[data-testid="stSidebar"] * {
-        color: #F0F6FC !important;
-    }
+    section[data-testid="stSidebar"] * { color: #F0F6FC !important; }
 
-    /* ---------- METRICS ---------- */
     div[data-testid="stMetric"] {
         background: #161B22;
         border-radius: 12px;
@@ -279,7 +556,6 @@ st.markdown("""
         font-weight: 600 !important;
     }
 
-    /* ---------- CARDS ---------- */
     .info-card {
         background: #161B22;
         border-radius: 12px;
@@ -322,7 +598,6 @@ st.markdown("""
         line-height: 1.55;
     }
 
-    /* ---------- SOLAR CARD ---------- */
     .solar-card {
         background: linear-gradient(135deg, rgba(255,223,74,0.15), rgba(255,223,74,0.04));
         border: 1px solid rgba(255,223,74,0.55);
@@ -335,7 +610,6 @@ st.markdown("""
     }
     .solar-card b { color: #FFEB8A !important; }
 
-    /* ---------- CAPTIVE NOTE ---------- */
     .captive-note {
         background: rgba(255,223,74,0.10);
         border: 1px solid rgba(255,223,74,0.45);
@@ -346,14 +620,8 @@ st.markdown("""
         margin: 0.5rem 0;
     }
 
-    /* ---------- ALERTS (Streamlit native) ---------- */
-    div[data-testid="stAlert"] {
-        border-radius: 10px;
-        padding: 0.9rem 1.1rem;
-    }
-    div[data-testid="stAlert"] * {
-        color: inherit !important;
-    }
+    div[data-testid="stAlert"] { border-radius: 10px; padding: 0.9rem 1.1rem; }
+    div[data-testid="stAlert"] * { color: inherit !important; }
     .stAlert p { color: #F0F6FC !important; }
     div[data-baseweb="notification"] {
         background-color: #161B22 !important;
@@ -361,7 +629,6 @@ st.markdown("""
     }
     div[data-baseweb="notification"] * { color: #F0F6FC !important; }
 
-    /* ---------- BUTTONS ---------- */
     .stButton > button {
         background: linear-gradient(90deg, #1F6FEB, #58A6FF);
         color: #FFFFFF !important;
@@ -379,7 +646,6 @@ st.markdown("""
     }
     .stButton > button * { color: #FFFFFF !important; }
 
-    /* ---------- INPUTS ---------- */
     input, textarea, select {
         background-color: #0D1117 !important;
         color: #F0F6FC !important;
@@ -391,7 +657,6 @@ st.markdown("""
         box-shadow: 0 0 0 2px rgba(88,166,255,0.25) !important;
     }
 
-    /* ---------- EXPANDERS ---------- */
     div[data-testid="stExpander"] {
         background: #0D1117;
         border: 1px solid #30363D;
@@ -405,19 +670,14 @@ st.markdown("""
     }
     div[data-testid="stExpander"] p,
     div[data-testid="stExpander"] span,
-    div[data-testid="stExpander"] label {
-        color: #F0F6FC !important;
-    }
+    div[data-testid="stExpander"] label { color: #F0F6FC !important; }
 
-    /* ---------- DATAFRAME ---------- */
     div[data-testid="stDataFrame"] {
         background: #0D1117;
         border-radius: 10px;
         border: 1px solid #30363D;
     }
-    div[data-testid="stDataFrame"] * {
-        color: #F0F6FC !important;
-    }
+    div[data-testid="stDataFrame"] * { color: #F0F6FC !important; }
     div[data-testid="stDataFrame"] th {
         background: #1F2937 !important;
         color: #FFFFFF !important;
@@ -428,21 +688,10 @@ st.markdown("""
         color: #F0F6FC !important;
     }
 
-    /* ---------- SLIDER ---------- */
-    div[data-testid="stSlider"] * {
-        color: #F0F6FC !important;
-    }
-    div[data-testid="stSlider"] label {
-        color: #F0F6FC !important;
-        font-weight: 600;
-    }
+    div[data-testid="stSlider"] * { color: #F0F6FC !important; }
+    div[data-testid="stSlider"] label { color: #F0F6FC !important; font-weight: 600; }
+    div[data-testid="stCaptionContainer"] * { color: #A0AAB5 !important; }
 
-    /* ---------- CAPTIONS ---------- */
-    div[data-testid="stCaptionContainer"] * {
-        color: #A0AAB5 !important;
-    }
-
-    /* ---------- MARKDOWN (AI output) ---------- */
     div[data-testid="stMarkdownContainer"] p,
     div[data-testid="stMarkdownContainer"] li,
     div[data-testid="stMarkdownContainer"] span {
@@ -457,18 +706,11 @@ st.markdown("""
     div[data-testid="stMarkdownContainer"] code {
         background: #21262D !important;
         color: #FFDF4A !important;
-        padding: 2px 6px;
-        border-radius: 4px;
+        padding: 2px 6px; border-radius: 4px;
     }
 
-    /* ---------- SPINNER ---------- */
     div[data-testid="stSpinner"] * { color: #F0F6FC !important; }
-
-    /* ---------- DIVIDERS ---------- */
-    hr {
-        border-color: #30363D !important;
-        margin: 1.5rem 0;
-    }
+    hr { border-color: #30363D !important; margin: 1.5rem 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -485,7 +727,10 @@ if "hist_df" not in st.session_state:
     st.session_state.hist_df = pd.DataFrame({
         "Month": MONTH_SEQ,
         "Consumption (kWh)": [None] * len(MONTH_SEQ),
-        "Bill (PKR)": [None] * len(MONTH_SEQ),
+        "Solar Gen (kWh)":   [None] * len(MONTH_SEQ),
+        "Solar Used (kWh)":  [None] * len(MONTH_SEQ),
+        "LESCO Import (kWh)":[None] * len(MONTH_SEQ),
+        "Bill (PKR)":        [None] * len(MONTH_SEQ),
     })
 if "analysis" not in st.session_state:
     st.session_state.analysis = None
@@ -541,7 +786,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("## 📊 Monthly History")
-    st.caption("Aug 2025 → Sep 2026. Fill only what you have.")
+    st.caption("Oct 2025 → Sep 2026. Fill only what you have.")
     st.session_state.hist_df = st.data_editor(
         st.session_state.hist_df,
         hide_index=True, use_container_width=True,
@@ -579,7 +824,7 @@ c1, c2, c3, c4 = st.columns(4)
 with c1:
     st.metric("Appliance Est.", "{:.0f} kWh/mo".format(appliance_monthly))
 with c2:
-    st.metric("Metered Avg", "{:.0f} kWh/mo".format(avg_cons))
+    st.metric("Metered Avg (12-mo)", "{:.0f} kWh/mo".format(avg_cons))
 with c3:
     st.metric("Avg Bill", "PKR {:,.0f}".format(avg_bill) if avg_bill else "—")
 with c4:
@@ -613,24 +858,63 @@ with sc2:
     )
 
 # =============================================================
-# APPLIANCE TABLE
+# MODERN CHARTS ROW 1 — Consumption trend + Donut
 # =============================================================
-st.markdown("### 🔌 Appliance Consumption Breakdown")
-app_df = pd.DataFrame([{
-    "Appliance": a.name,
-    "Watts": a.watts,
-    "Hrs/Session": a.hours,
-    "Days/Week": a.days_per_week,
-    "Qty": a.qty,
-    "kWh/Month": round(a.monthly_kwh, 1),
-    "% of Total": round(a.monthly_kwh / appliance_monthly * 100, 1) if appliance_monthly > 0 else 0,
-} for a in appliances])
-st.dataframe(app_df, hide_index=True, use_container_width=True)
+st.markdown("### 📊 Consumption Analytics")
+col_left, col_right = st.columns([1.15, 1])
+
+with col_left:
+    fig_line = chart_consumption_line(history_df, appliance_monthly)
+    if fig_line:
+        st.plotly_chart(fig_line, use_container_width=True)
+    else:
+        st.info("📝 Add monthly Consumption (kWh) in the sidebar to see the trend.")
+
+with col_right:
+    app_df = pd.DataFrame([{
+        "Appliance": a.name,
+        "Watts": a.watts,
+        "Hrs/Session": a.hours,
+        "Days/Week": a.days_per_week,
+        "Qty": a.qty,
+        "kWh/Month": round(a.monthly_kwh, 1),
+    } for a in appliances])
+    st.plotly_chart(chart_appliance_modern(app_df), use_container_width=True)
 
 # =============================================================
-# HISTORY
+# MODERN CHARTS ROW 2 — Stacked + Bill Trend
 # =============================================================
-st.markdown("### 📊 14-Month History (Aug 2025 → Sep 2026)")
+col_l2, col_r2 = st.columns(2)
+
+with col_l2:
+    st.plotly_chart(chart_monthly_stacked(history_df), use_container_width=True)
+
+with col_r2:
+    fig_bill = chart_bill_trend(history_df)
+    if fig_bill:
+        st.plotly_chart(fig_bill, use_container_width=True)
+    else:
+        st.info("📝 Add monthly Bill (PKR) in the sidebar to see the bill trend.")
+
+# =============================================================
+# SOLAR UTILIZATION (if data present)
+# =============================================================
+fig_util = chart_solar_utilization(history_df)
+if fig_util:
+    st.plotly_chart(fig_util, use_container_width=True)
+
+# =============================================================
+# APPLIANCE TABLE
+# =============================================================
+st.markdown("### 🔌 Appliance Detail")
+app_detail = app_df.copy()
+app_detail["% of Total"] = (app_detail["kWh/Month"] / appliance_monthly * 100).round(1) if appliance_monthly > 0 else 0
+st.dataframe(app_detail, hide_index=True, use_container_width=True)
+
+# =============================================================
+# HISTORY TABLE VIEW
+# =============================================================
+st.markdown("### 📊 12-Month Data (Oct 2025 → Sep 2026)")
 st.dataframe(st.session_state.hist_df, hide_index=True, use_container_width=True)
 
 # =============================================================
@@ -783,8 +1067,8 @@ st.warning(
 st.markdown("---")
 st.markdown(
     '<p style="text-align:center; color:#A0AAB5; font-size:0.8rem;">'
-    'Home Energy Manager v3.0 | Captive Solar (No Export) | '
-    'LLM Analysis | Groq · openai/gpt-oss-120b'
+    'Home Energy Manager v3.2 | Oct 2025 → Sep 2026 | '
+    'Captive Solar (No Export) | Groq · openai/gpt-oss-120b'
     '</p>',
     unsafe_allow_html=True,
 )
