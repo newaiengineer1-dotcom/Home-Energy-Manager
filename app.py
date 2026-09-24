@@ -6,6 +6,16 @@ The app auto-calibrates the tariff structure from the user's
 previous-year monthly kWh and/or monthly PKR bills.
 No manual entry of tariffs, rates, or thresholds required.
 """
+import os
+
+# --- Bridge Streamlit secrets to os.environ (required for CrewAI/litellm) ---
+try:
+    for _k in ("GROQ_API_KEY",):
+        if _k in st.secrets and not os.environ.get(_k):
+            os.environ[_k] = str(st.secrets[_k]).strip()
+except Exception:
+    pass
+# ---------------------------------------------------------------------------
 import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
