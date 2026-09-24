@@ -1,3 +1,4 @@
+"""
 ⚡ Home Energy Management Dashboard
 LESCO Protected Consumer Optimizer — September 2026
 
