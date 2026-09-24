@@ -1,4 +1,3 @@
-"""
 ⚡ Home Energy Management Dashboard
 LESCO Protected Consumer Optimizer — September 2026
 
@@ -308,14 +307,21 @@ with st.sidebar:
             st.session_state.appliances.append({
                 "name": new_name, "watts": new_w, "hours": new_h, "qty": new_q,
             })
-            st.rerun()
-
-    st.markdown("### 📋 Current Appliances")
+               st.markdown("### 📋 Current Appliances")
     for i, app in enumerate(st.session_state.appliances):
         with st.expander(f"{app['name']} — {app['watts']}W × {app['qty']}", expanded=False):
-            app["watts"] = st.number_input("Watts", 1, 10000, app["watts"], key=f"w_{i}")
-            app["hours"] = st.number_input("Hours/Day", 0.1, 24.0, app["hours"], key=f"h_{i}")
-            app["qty"] = st.number_input("Quantity", 1, 20, app["qty"], key=f"q_{i}")
+            app["watts"] = st.number_input(
+                "Watts", min_value=1, max_value=10000,
+                value=int(app["watts"]), step=10, key=f"w_{i}",
+            )
+            app["hours"] = st.number_input(
+                "Hours/Day", min_value=0.1, max_value=24.0,
+                value=float(app["hours"]), step=0.5, key=f"h_{i}",
+            )
+            app["qty"] = st.number_input(
+                "Quantity", min_value=1, max_value=20,
+                value=int(app["qty"]), step=1, key=f"q_{i}",
+            )
             if st.button("🗑️ Remove", key=f"del_{i}"):
                 st.session_state.appliances.pop(i)
                 st.rerun()
