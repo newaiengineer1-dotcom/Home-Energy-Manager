@@ -1,6 +1,6 @@
 """
-⚡ Home Energy Management Dashboard
-LESCO Protected Consumer Optimizer — September 2026
+Home Energy Management Dashboard
+LESCO Protected Consumer Optimizer - September 2026
 
 The app auto-calibrates the tariff structure from the user's
 previous-year monthly kWh and/or monthly PKR bills.
@@ -11,12 +11,12 @@ import plotly.graph_objects as go
 import plotly.express as px
 from dataclasses import dataclass, field
 
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 # 1. INTERNAL DEFAULTS (used only as fallback when no history)
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 DEFAULT_PROTECTED_LIMIT = 200.0
-DEFAULT_PROTECTED_RATE = 13.40      # effective PKR/unit, all-in (LESCO Sep 2026)
-DEFAULT_UNPROTECTED_RATE = 42.80    # effective PKR/unit, all-in
+DEFAULT_PROTECTED_RATE = 13.40
+DEFAULT_UNPROTECTED_RATE = 42.80
 DEFAULT_SOLAR_KWP = 5.0
 DEFAULT_BATTERY_KWH = 10.0
 
@@ -24,7 +24,7 @@ LAHORE_PEAK_SUN_HOURS = 5.2
 DAY_LOAD_RATIO = 0.60
 BATTERY_EFFICIENCY = 0.85
 BATTERY_SHIFT_LIMIT = 0.40
-EXPORT_RATE = 11.0                  # PKR/unit — Net Billing 2026
+EXPORT_RATE = 11.0
 
 MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -38,17 +38,17 @@ COLORS = {
 }
 
 DEFAULT_APPLIANCES = [
-    {"name": "Air Conditioner (1.5 Ton)", "watts": 1500, "hours": 8, "qty": 1},
-    {"name": "Refrigerator", "watts": 200, "hours": 24, "qty": 1},
-    {"name": "LED Lights (set of 10)", "watts": 100, "hours": 6, "qty": 1},
-    {"name": "Ceiling Fan", "watts": 80, "hours": 12, "qty": 3},
-    {"name": "Water Heater (Geyser)", "watts": 2000, "hours": 1, "qty": 1},
-    {"name": "Washing Machine", "watts": 500, "hours": 1, "qty": 1},
+    {"name": "Air Conditioner (1.5 Ton)", "watts": 1500, "hours": 8.0, "qty": 1},
+    {"name": "Refrigerator", "watts": 200, "hours": 24.0, "qty": 1},
+    {"name": "LED Lights (set of 10)", "watts": 100, "hours": 6.0, "qty": 1},
+    {"name": "Ceiling Fan", "watts": 80, "hours": 12.0, "qty": 3},
+    {"name": "Water Heater (Geyser)", "watts": 2000, "hours": 1.0, "qty": 1},
+    {"name": "Washing Machine", "watts": 500, "hours": 1.0, "qty": 1},
 ]
 
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 # 2. DATA MODELS
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 @dataclass
 class Appliance:
     name: str
@@ -73,16 +73,14 @@ class SystemConfig:
 
 @dataclass
 class Tariff:
-    """Derived or default tariff structure (effective all-in PKR/unit)."""
     protected_limit: float = DEFAULT_PROTECTED_LIMIT
     protected_rate: float = DEFAULT_PROTECTED_RATE
     unprotected_rate: float = DEFAULT_UNPROTECTED_RATE
     calibrated: bool = False
-    source: str = "defaults"           # e.g. "calibrated from 12 months"
-    confidence: str = "low"            # "low" | "medium" | "high"
+    source: str = "defaults"
+    confidence: str = "low"
 
     def bill_for(self, units: float) -> dict:
-        """Effective-rate bill calculation (two-tier)."""
         if units <= 0:
             return {"total": 0, "per_unit": 0,
                     "p_units": 0, "u_units": 0, "p_cost": 0, "u_cost": 0}
@@ -119,11 +117,10 @@ class Snapshot:
     remaining: float = 0.0
     bill: dict = field(default_factory=dict)
 
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 # 3. AUTO-CALIBRATION
-# ═════════════════════════════════════════════════════════════
-def _parse_csv(text: str) -> list[float]:
-    """Parse comma/space/newline separated floats."""
+# =============================================================
+def _parse_csv(text: str) -> list:
     if not text:
         return []
     tokens = text.replace("\n", ",").replace(" ", ",").split(",")
@@ -140,17 +137,6 @@ def _parse_csv(text: str) -> list[float]:
 
 
 def calibrate_tariff(kwh_csv: str, bill_csv: str) -> Tariff:
-    """
-    Derive an effective two-tier tariff from historical monthly data.
-
-    Logic:
-      1. Parse kWh and bill CSVs.
-      2. If both are present with matching length >= 3, compute effective
-         PKR/unit for each month.
-      3. Find the threshold as the largest jump in effective rate within
-         the plausible 100–400 unit range.
-      4. Average the effective rate below and above the threshold.
-    """
     t = Tariff()
     kwh = _parse_csv(kwh_csv)
     bills = _parse_csv(bill_csv)
@@ -159,11 +145,9 @@ def calibrate_tariff(kwh_csv: str, bill_csv: str) -> Tariff:
     has_bills = len(bills) >= 3
 
     if has_kwh and has_bills and len(kwh) == len(bills):
-        # ── Full calibration ───────────────────────────────────
         rates = [(b / k) if k > 0 else 0.0 for k, b in zip(kwh, bills)]
         pairs = sorted(zip(kwh, rates))
 
-        # Find threshold: largest positive jump in effective rate
         max_jump, threshold = 0.0, DEFAULT_PROTECTED_LIMIT
         for i in range(1, len(pairs)):
             u_prev, r_prev = pairs[i - 1]
@@ -184,27 +168,24 @@ def calibrate_tariff(kwh_csv: str, bill_csv: str) -> Tariff:
 
         t.protected_limit = round(threshold)
         t.calibrated = True
-        t.source = f"calibrated from {len(kwh)} months"
+        t.source = "calibrated from {} months".format(len(kwh))
         t.confidence = "high" if len(kwh) >= 8 else "medium"
 
     elif has_kwh and not has_bills:
-        # Only kWh — no bill data means we can't derive rates.
-        # Keep defaults but flag source.
-        t.source = f"defaults (kWh history: {len(kwh)} months)"
+        t.source = "defaults (kWh history: {} months)".format(len(kwh))
         t.confidence = "low"
 
     elif has_bills and not has_kwh:
-        # Only bills — can't derive units, only average bill amount.
         avg_bill = sum(bills) / len(bills)
-        t.source = f"defaults (avg bill: PKR {avg_bill:,.0f})"
+        t.source = "defaults (avg bill: PKR {:,.0f})".format(avg_bill)
         t.confidence = "low"
 
     return t
 
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 # 4. ENERGY COMPUTATION
-# ═════════════════════════════════════════════════════════════
-def build_snapshot(appliances, system: SystemConfig, tariff: Tariff) -> Snapshot:
+# =============================================================
+def build_snapshot(appliances, system, tariff):
     s = Snapshot(appliances=appliances, system=system, tariff=tariff)
 
     s.total_daily_kwh = sum(a.daily_kwh for a in appliances)
@@ -229,55 +210,54 @@ def build_snapshot(appliances, system: SystemConfig, tariff: Tariff) -> Snapshot
     s.bill = tariff.bill_for(s.grid_after_battery)
     return s
 
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 # 5. PAGE CONFIG + CSS
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 st.set_page_config(
-    page_title="⚡ Home Energy Manager",
+    page_title="Home Energy Manager",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.markdown(f"""
+st.markdown("""
 <style>
-    .stApp {{
-        background: linear-gradient(135deg, {COLORS['bg']} 0%, {COLORS['bg2']} 100%);
-    }}
-    .main-header {{
+    .stApp {
+        background: linear-gradient(135deg, #0D1117 0%, #161B22 100%);
+    }
+    .main-header {
         font-size: 2.5rem; font-weight: 800;
-        background: linear-gradient(90deg, {COLORS['primary']}, {COLORS['success']}, {COLORS['solar']});
+        background: linear-gradient(90deg, #58A6FF, #3FB950, #FFDF4A);
         -webkit-background-clip: text; -webkit-text-fill-color: transparent;
         text-align: center; padding: 1rem 0;
-    }}
-    .action-card {{
-        background: {COLORS['bg2']};
-        border-left: 5px solid {COLORS['success']};
+    }
+    .action-card {
+        background: #161B22; border-left: 5px solid #3FB950;
         border-radius: 12px; padding: 1rem 1.5rem;
-        margin: 0.5rem 0; color: {COLORS['text']};
-    }}
-    .action-card-warning {{ border-left-color: {COLORS['warning']}; }}
-    .action-card-danger  {{ border-left-color: {COLORS['danger']}; }}
-    div[data-testid="stMetric"] {{
-        background: {COLORS['bg2']}; border-radius: 12px;
-        padding: 1rem; border: 1px solid {COLORS['border']};
-    }}
-    .tariff-badge {{
+        margin: 0.5rem 0; color: #C9D1D9;
+    }
+    .action-card-warning { border-left-color: #D29922; }
+    .action-card-danger  { border-left-color: #F85149; }
+    div[data-testid="stMetric"] {
+        background: #161B22; border-radius: 12px;
+        padding: 1rem; border: 1px solid #30363D;
+    }
+    .tariff-badge {
         display: inline-block; padding: 0.35rem 0.9rem;
         border-radius: 20px; font-size: 0.8rem; font-weight: 600;
-        background: rgba(88,166,255,0.15); color: {COLORS['primary']};
+        background: rgba(88,166,255,0.15); color: #58A6FF;
         border: 1px solid rgba(88,166,255,0.35);
-    }}
-    .tariff-badge-ok {{
-        background: rgba(63,185,80,0.15); color: {COLORS['success']};
+    }
+    .tariff-badge-ok {
+        background: rgba(63,185,80,0.15); color: #3FB950;
         border-color: rgba(63,185,80,0.35);
-    }}
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 # 6. SESSION STATE
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 if "appliances" not in st.session_state:
     st.session_state.appliances = [dict(a) for a in DEFAULT_APPLIANCES]
 if "solar_kwp" not in st.session_state:
@@ -291,44 +271,53 @@ if "hist_bill" not in st.session_state:
 if "ai_result" not in st.session_state:
     st.session_state.ai_result = ""
 
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 # 7. SIDEBAR
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 with st.sidebar:
-    st.markdown("## 🔌 Appliance Manager")
+    st.markdown("## Appliance Manager")
     st.markdown("---")
 
-    with st.expander("➕ Add New Appliance", expanded=False):
+    with st.expander("Add New Appliance", expanded=False):
         new_name = st.text_input("Appliance Name", key="new_name")
         c1, c2, c3 = st.columns(3)
-        new_w = c1.number_input("Watts", 1, 10000, 100, key="new_w")
-        new_h = c2.number_input("Hours/Day", 0.1, 24.0, 2.0, step=0.5, key="new_h")
-        new_q = c3.number_input("Qty", 1, 20, 1, key="new_q")
+        new_w = c1.number_input("Watts", min_value=1, max_value=10000,
+                                value=100, step=10, key="new_w")
+        new_h = c2.number_input("Hours/Day", min_value=0.1, max_value=24.0,
+                                value=2.0, step=0.5, key="new_h")
+        new_q = c3.number_input("Qty", min_value=1, max_value=20,
+                                value=1, step=1, key="new_q")
         if st.button("Add Appliance", use_container_width=True) and new_name:
             st.session_state.appliances.append({
-                "name": new_name, "watts": new_w, "hours": new_h, "qty": new_q,
+                "name": new_name,
+                "watts": int(new_w),
+                "hours": float(new_h),
+                "qty": int(new_q),
             })
-               st.markdown("### 📋 Current Appliances")
+            st.rerun()
+
+    st.markdown("### Current Appliances")
     for i, app in enumerate(st.session_state.appliances):
-        with st.expander(f"{app['name']} — {app['watts']}W × {app['qty']}", expanded=False):
+        label = "{} - {}W x {}".format(app["name"], app["watts"], app["qty"])
+        with st.expander(label, expanded=False):
             app["watts"] = st.number_input(
                 "Watts", min_value=1, max_value=10000,
-                value=int(app["watts"]), step=10, key=f"w_{i}",
+                value=int(app["watts"]), step=10, key="w_{}".format(i),
             )
             app["hours"] = st.number_input(
                 "Hours/Day", min_value=0.1, max_value=24.0,
-                value=float(app["hours"]), step=0.5, key=f"h_{i}",
+                value=float(app["hours"]), step=0.5, key="h_{}".format(i),
             )
             app["qty"] = st.number_input(
                 "Quantity", min_value=1, max_value=20,
-                value=int(app["qty"]), step=1, key=f"q_{i}",
+                value=int(app["qty"]), step=1, key="q_{}".format(i),
             )
-            if st.button("🗑️ Remove", key=f"del_{i}"):
+            if st.button("Remove", key="del_{}".format(i)):
                 st.session_state.appliances.pop(i)
                 st.rerun()
 
     st.markdown("---")
-    st.markdown("## ☀️ Solar & Battery")
+    st.markdown("## Solar & Battery")
     st.session_state.solar_kwp = st.slider(
         "Solar PV System (kWp)", 0.0, 20.0, st.session_state.solar_kwp, 0.5,
     )
@@ -337,11 +326,10 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.markdown("## 📊 Previous Year Data")
+    st.markdown("## Previous Year Data")
     st.caption(
-        "Paste your last 12 months of consumption and/or bills. "
-        "The app auto-derives the effective tariff — no need to enter "
-        "tariffs, rates, or thresholds."
+        "Paste last 12 months of consumption and/or bills. "
+        "The app auto-derives the effective tariff."
     )
 
     st.session_state.hist_kwh = st.text_area(
@@ -357,9 +345,9 @@ with st.sidebar:
         height=80,
     )
 
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 # 8. BUILD SNAPSHOT
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 appliances = [Appliance(**a) for a in st.session_state.appliances]
 system = SystemConfig(
     solar_kwp=st.session_state.solar_kwp,
@@ -368,53 +356,55 @@ system = SystemConfig(
 tariff = calibrate_tariff(st.session_state.hist_kwh, st.session_state.hist_bill)
 snap = build_snapshot(appliances, system, tariff)
 
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 # 9. HEADER
-# ═════════════════════════════════════════════════════════════
-st.markdown('<div class="main-header">⚡ Home Energy Management Dashboard</div>',
+# =============================================================
+st.markdown('<div class="main-header">Home Energy Management Dashboard</div>',
             unsafe_allow_html=True)
 st.markdown(
     "<p style='text-align:center; color:#8B949E;'>"
-    "📅 September 2026 &nbsp;|&nbsp; LESCO Protected Consumer Optimizer</p>",
+    "September 2026 | LESCO Protected Consumer Optimizer</p>",
     unsafe_allow_html=True,
 )
 
-# Tariff source badge
 badge_class = "tariff-badge tariff-badge-ok" if tariff.calibrated else "tariff-badge"
+badge_prefix = "OK " if tariff.calibrated else "DEFAULTS "
+badge_text = (
+    badge_prefix
+    + "Tariff: " + tariff.source
+    + " | Protected <=" + str(int(tariff.protected_limit))
+    + " @ PKR " + str(tariff.protected_rate) + "/unit"
+    + " | Unprotected @ PKR " + str(tariff.unprotected_rate) + "/unit"
+)
 st.markdown(
-    f"<div style='text-align:center; margin: 0.5rem 0 1rem 0;'>"
-    f"<span class='{badge_class}'>"
-    f"{'✅ ' if tariff.calibrated else '⚙️ '}"
-    f"Tariff: {tariff.source} · "
-    f"Protected ≤{tariff.protected_limit:.0f} @ PKR {tariff.protected_rate}/unit · "
-    f"Unprotected @ PKR {tariff.unprotected_rate}/unit"
-    f"</span></div>",
+    "<div style='text-align:center; margin: 0.5rem 0 1rem 0;'>"
+    "<span class='" + badge_class + "'>" + badge_text + "</span></div>",
     unsafe_allow_html=True,
 )
 st.markdown("---")
 
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 # 10. KPI CARDS
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 c1, c2, c3, c4 = st.columns(4)
 with c1:
-    st.metric("📊 Monthly Grid Units", f"{snap.grid_after_battery:.0f}",
-              delta="✅ Protected" if snap.is_protected else "🔴 Unprotected",
+    st.metric("Monthly Grid Units", "{:.0f}".format(snap.grid_after_battery),
+              delta="Protected" if snap.is_protected else "Unprotected",
               delta_color="normal" if snap.is_protected else "inverse")
 with c2:
-    st.metric("💰 Estimated Bill", f"PKR {snap.bill['total']:,.0f}",
-              delta=f"{snap.bill['per_unit']:.2f} PKR/unit")
+    st.metric("Estimated Bill", "PKR {:,.0f}".format(snap.bill["total"]),
+              delta="{:.2f} PKR/unit".format(snap.bill["per_unit"]))
 with c3:
-    st.metric("☀️ Solar Generation", f"{snap.solar_monthly_kwh:.0f} kWh",
-              delta=f"{snap.solar_self_consumed:.0f} self-consumed")
+    st.metric("Solar Generation", "{:.0f} kWh".format(snap.solar_monthly_kwh),
+              delta="{:.0f} self-consumed".format(snap.solar_self_consumed))
 with c4:
-    st.metric("🔋 Battery Backup", f"{snap.system.battery_kwh:.0f} kWh",
-              delta=f"~{snap.battery_shifted:.0f} units shifted")
+    st.metric("Battery Backup", "{:.0f} kWh".format(snap.system.battery_kwh),
+              delta="~{:.0f} units shifted".format(snap.battery_shifted))
 
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 # 11. THRESHOLD GAUGE
-# ═════════════════════════════════════════════════════════════
-st.markdown(f"### 🎯 Protected Status Threshold (≤{tariff.protected_limit:.0f} units)")
+# =============================================================
+st.markdown("### Protected Status Threshold (<={:.0f} units)".format(tariff.protected_limit))
 col_g, col_i = st.columns([2, 1])
 
 with col_g:
@@ -445,16 +435,16 @@ with col_g:
 
 with col_i:
     if snap.remaining > 20:
-        st.success(f"✅ **ON TRACK**\n\n{snap.remaining:.0f} units remaining")
+        st.success("ON TRACK - {:.0f} units remaining".format(snap.remaining))
     elif snap.remaining > 0:
-        st.warning(f"⚠️ **CAUTION**\n\nOnly {snap.remaining:.0f} units left")
+        st.warning("CAUTION - Only {:.0f} units left".format(snap.remaining))
     else:
-        st.error(f"🔴 **EXCEEDED**\n\n{abs(snap.remaining):.0f} units over")
+        st.error("EXCEEDED by {:.0f} units".format(abs(snap.remaining)))
 
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 # 12. SANKEY
-# ═════════════════════════════════════════════════════════════
-st.markdown("### 🔄 Energy Flow")
+# =============================================================
+st.markdown("### Energy Flow")
 fig_s = go.Figure(go.Sankey(
     node=dict(pad=20, thickness=25,
               line=dict(color=COLORS["border"], width=0.5),
@@ -475,13 +465,13 @@ fig_s.update_layout(height=350, paper_bgcolor="rgba(0,0,0,0)",
                     margin=dict(l=20, r=20, t=30, b=20))
 st.plotly_chart(fig_s, use_container_width=True)
 
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 # 13. DONUT + HISTORICAL TREND
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 c_left, c_right = st.columns(2)
 
 with c_left:
-    st.markdown("### 🔌 Appliance Breakdown")
+    st.markdown("### Appliance Breakdown")
     fig_d = go.Figure(go.Pie(
         labels=[a.name for a in snap.appliances],
         values=[a.monthly_kwh for a in snap.appliances],
@@ -494,14 +484,17 @@ with c_left:
     st.plotly_chart(fig_d, use_container_width=True)
 
 with c_right:
-    st.markdown("### 📈 Previous Year Consumption Trend")
+    st.markdown("### Previous Year Consumption Trend")
 
     hist_kwh = _parse_csv(st.session_state.hist_kwh)
     hist_bill = _parse_csv(st.session_state.hist_bill)
 
     if hist_kwh:
-        months = MONTH_LABELS[-len(hist_kwh):] if len(hist_kwh) <= 12 else \
-                 [f"M{i+1}" for i in range(len(hist_kwh))]
+        if len(hist_kwh) <= 12:
+            months = MONTH_LABELS[-len(hist_kwh):]
+        else:
+            months = ["M{}".format(i + 1) for i in range(len(hist_kwh))]
+
         fig_t = go.Figure()
         fig_t.add_trace(go.Scatter(
             x=months, y=hist_kwh, mode="lines+markers", name="kWh",
@@ -518,7 +511,7 @@ with c_right:
             ))
         fig_t.add_hline(y=tariff.protected_limit, line_dash="dash",
                         line_color=COLORS["danger"],
-                        annotation_text=f"Protected Limit ({tariff.protected_limit:.0f})")
+                        annotation_text="Protected Limit ({:.0f})".format(tariff.protected_limit))
         fig_t.update_layout(
             height=350, paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)", font={"color": COLORS["text"]},
@@ -531,99 +524,109 @@ with c_right:
         )
         st.plotly_chart(fig_t, use_container_width=True)
     else:
-        st.info("📝 Enter previous-year monthly kWh in the sidebar to see trends.")
+        st.info("Enter previous-year monthly kWh in the sidebar to see trends.")
 
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 # 14. ACTION CARDS
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 st.markdown("---")
-st.markdown("### 🎯 Recommended Actions")
+st.markdown("### Recommended Actions")
 
 if snap.remaining > 20:
-    st.markdown("""<div class="action-card">
-    <b>✅ You are on track!</b> Keep current consumption patterns.
-    Your grid import is within the protected threshold.
-    </div>""", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="action-card">'
+        '<b>You are on track!</b> Keep current consumption patterns. '
+        'Your grid import is within the protected threshold.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 elif snap.remaining > 0:
-    st.markdown(f"""<div class="action-card action-card-warning">
-    <b>⚠️ Caution: {snap.remaining:.0f} units remaining.</b>
-    Take these actions immediately:
-    </div>""", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="action-card action-card-warning">'
+        '<b>Caution: {:.0f} units remaining.</b> '
+        'Take these actions immediately:'
+        '</div>'.format(snap.remaining),
+        unsafe_allow_html=True,
+    )
     st.markdown("""
-    - 🔆 **Increase solar to reduce grid import** — Each +1 kWp offsets ~110-150 units/month
-    - 🔋 **Add battery capacity** — Each +5 kWh shifts ~4-6 units/day from grid to solar
-    - ⏰ **Shift AC/geyser usage to 10 AM–3 PM** (solar peak)
-    - 💡 **Switch to LED bulbs** — saves 3-5 units/month
-    - ❄️ **Set AC to 26°C** — saves up to 24% AC energy
+    - Increase solar to reduce grid import - Each +1 kWp offsets ~110-150 units/month
+    - Add battery capacity - Each +5 kWh shifts ~4-6 units/day from grid to solar
+    - Shift AC/geyser usage to 10 AM-3 PM (solar peak)
+    - Switch to LED bulbs - saves 3-5 units/month
+    - Set AC to 26 degrees C - saves up to 24% AC energy
     """)
 else:
-    st.markdown(f"""<div class="action-card action-card-danger">
-    <b>🔴 EXCEEDED by {abs(snap.remaining):.0f} units!</b>
-    Immediate action required:
-    </div>""", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="action-card action-card-danger">'
+        '<b>EXCEEDED by {:.0f} units!</b> '
+        'Immediate action required:'
+        '</div>'.format(abs(snap.remaining)),
+        unsafe_allow_html=True,
+    )
     st.markdown("""
-    - 🚨 **Reduce consumption immediately** — Unprotected rates are 2-3× higher
-    - 🔆 **Add solar kWp urgently** — Minimum 2 kWp additional recommended
-    - 🔋 **Maximize battery** — Store solar for night use
-    - 📞 **Do NOT install a second meter** — LESCO crackdown active since 2026
-    - 📋 **Check separate-family exception** (separate kitchen + wiring required)
+    - Reduce consumption immediately - Unprotected rates are 2-3x higher
+    - Add solar kWp urgently - Minimum 2 kWp additional recommended
+    - Maximize battery - Store solar for night use
+    - Do NOT install a second meter - LESCO crackdown active since 2026
+    - Check separate-family exception (separate kitchen + wiring required)
     """)
 
 st.markdown("---")
 st.warning(
-    "**⚠️ Legal Notice (September 2026):** LESCO is actively cracking down on "
-    "multiple meters used to artificially stay under 200 units. Households found "
-    "doing this immediately lose protected status. Multiple meters are only "
-    "permissible where **separate families occupy distinct portions with "
-    "independent kitchens and wiring**."
+    "Legal Notice (September 2026): LESCO is actively cracking down on "
+    "multiple meters used to artificially stay under 200 units. Households "
+    "found doing this immediately lose protected status. Multiple meters are "
+    "only permissible where separate families occupy distinct portions with "
+    "independent kitchens and wiring."
 )
 
-# ═════════════════════════════════════════════════════════════
-# 15. BILL BREAKDOWN (effective-rate, two-tier)
-# ═════════════════════════════════════════════════════════════
-st.markdown("### 💰 Bill Breakdown")
+# =============================================================
+# 15. BILL BREAKDOWN
+# =============================================================
+st.markdown("### Bill Breakdown")
 b = snap.bill
 bc = st.columns(4)
 with bc[0]:
     st.metric(
-        f"Protected ({b['p_units']} units)",
-        f"PKR {b['p_cost']:,.0f}",
-        delta=f"@ {tariff.protected_rate}/unit",
+        "Protected ({} units)".format(b["p_units"]),
+        "PKR {:,.0f}".format(b["p_cost"]),
+        delta="@ {}/unit".format(tariff.protected_rate),
         delta_color="off",
     )
 with bc[1]:
     if b["u_units"] > 0:
         st.metric(
-            f"Unprotected ({b['u_units']} units)",
-            f"PKR {b['u_cost']:,.0f}",
-            delta=f"@ {tariff.unprotected_rate}/unit",
+            "Unprotected ({} units)".format(b["u_units"]),
+            "PKR {:,.0f}".format(b["u_cost"]),
+            delta="@ {}/unit".format(tariff.unprotected_rate),
             delta_color="off",
         )
     else:
         st.metric("Unprotected", "PKR 0", delta="none", delta_color="off")
 with bc[2]:
-    st.metric("Effective Rate", f"PKR {b['per_unit']:.2f}/unit")
+    st.metric("Effective Rate", "PKR {:.2f}/unit".format(b["per_unit"]))
 with bc[3]:
-    st.metric("**Total Bill**", f"**PKR {b['total']:,.0f}**")
+    st.metric("Total Bill", "PKR {:,.0f}".format(b["total"]))
 
 if snap.solar_export > 0:
     st.info(
-        f"💡 **Net Billing Credit:** Exported {snap.solar_export:.0f} units "
-        f"at ~PKR {EXPORT_RATE:.0f}/unit = **PKR {snap.export_credit:,.0f}** credit "
-        f"(2026 Net Billing policy)"
+        "Net Billing Credit: Exported {:.0f} units at ~PKR {:.0f}/unit = "
+        "PKR {:,.0f} credit (2026 Net Billing policy)".format(
+            snap.solar_export, EXPORT_RATE, snap.export_credit
+        )
     )
 
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 # 16. AI INSIGHTS
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 st.markdown("---")
-st.markdown("### 🤖 AI Energy Advisor (Groq · gpt-oss-120b)")
+st.markdown("### AI Energy Advisor (Groq / gpt-oss-120b)")
 
 try:
     from agents import run_energy_analysis
-    if st.button("🧠 Run AI Analysis", use_container_width=True):
+    if st.button("Run AI Analysis", use_container_width=True):
         summary = ", ".join(
-            f"{a.name} ({a.watts}W×{a.qty}×{a.hours}h)"
+            "{} ({}W x {} x {}h)".format(a.name, a.watts, a.qty, a.hours)
             for a in snap.appliances
         )
         with st.spinner("Agents are analyzing your setup..."):
@@ -636,15 +639,15 @@ try:
     if st.session_state.ai_result:
         st.markdown(st.session_state.ai_result)
 except ImportError:
-    st.caption("💡 AI advisor disabled — add `agents.py` to enable.")
+    st.caption("AI advisor disabled - add agents.py to enable.")
 
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 # 17. FOOTER
-# ═════════════════════════════════════════════════════════════
+# =============================================================
 st.markdown("---")
 st.markdown(
     "<p style='text-align:center; color:#8B949E; font-size:0.8rem;'>"
-    "⚡ Home Energy Manager v1.1 | Auto-calibrated tariff | "
+    "Home Energy Manager v1.1 | Auto-calibrated tariff | "
     "Net Billing (NEPRA Feb 2026) | Streamlit + Plotly + CrewAI + Groq"
     "</p>",
     unsafe_allow_html=True,
