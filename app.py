@@ -5,6 +5,7 @@ LESCO Protected Consumer | Captive Solar (No Export) | Sep 2026
 Data window: Oct 2025 -> Sep 2026 (12 months)
 Modern graphics. High-contrast theme.
 Solar estimates use CONSERVATIVE AVERAGE values (not peak).
+User provides only Consumption + Bill; Solar Gen/Used are auto-estimated.
 """
 import os
 import json
@@ -57,11 +58,13 @@ COLORS = {
 }
 
 # =============================================================
-# CONSERVATIVE SOLAR CONSTANTS — used in prompts and formula
+# CONSERVATIVE SOLAR CONSTANTS
 # =============================================================
 LAHORE_AVG_PSH = 4.8        # annual average peak sun hours (not summer peak)
 PV_SYSTEM_LOSS = 0.20       # 20% system losses (inverter, wiring, soiling)
 DAYS_PER_MONTH = 30
+DAY_LOAD_RATIO = 0.55       # share of daily load during solar hours
+BATTERY_EFFICIENCY = 0.85   # round-trip LiFePO4
 
 DEFAULT_APPLIANCES = [
     {"name": "Inverter AC 1.5T @26C (2x/week, 6h)", "watts": 550,  "hours": 6.0,  "days_per_week": 2, "qty": 1},
@@ -118,21 +121,31 @@ def _fmt_appliance_table(appliances):
     return "\n".join(lines)
 
 
-def _fmt_history_table(df):
-    lines = ["Month | Consumption(kWh) | Bill(PKR)"]
+def _fmt_enriched_history_table(enriched_df):
+    """Format the enriched history (with app-estimated Solar Gen/Used) for the LLM."""
+    lines = ["Month | Consumption | Bill | Solar Gen* | Solar Used* | LESCO Import*"]
     has = False
-    for _, row in df.iterrows():
+    for _, row in enriched_df.iterrows():
         cons = _parse_num(row.get("Consumption (kWh)"))
         bill = _parse_num(row.get("Bill (PKR)"))
+        gen = _parse_num(row.get("Solar Gen (kWh)"))
+        used = _parse_num(row.get("Solar Used (kWh)"))
+        lesco = _parse_num(row.get("LESCO Import (kWh)"))
         if cons is None and bill is None:
             continue
         has = True
-        lines.append("{} | {} | {}".format(
+        lines.append("{} | {} | {} | {} | {} | {}".format(
             row["Month"],
             "{:.0f}".format(cons) if cons is not None else "N/A",
             "{:.0f}".format(bill) if bill is not None else "N/A",
+            "{:.0f}".format(gen) if gen is not None else "N/A",
+            "{:.0f}".format(used) if used is not None else "N/A",
+            "{:.0f}".format(lesco) if lesco is not None else "N/A",
         ))
-    return "\n".join(lines) if has else "(no history provided)"
+    if not has:
+        return "(no history provided)"
+    lines.append("(* = estimated by app using conservative solar constants)")
+    return "\n".join(lines)
 
 
 def formula_solar_estimate(kwp):
@@ -148,6 +161,57 @@ def formula_solar_estimate(kwp):
         "monthly_kwh": round(monthly, 0),
         "annual_kwh": round(annual, 0),
     }
+
+
+def estimate_monthly_flows(history_df, solar_kwp, battery_kwh):
+    """
+    Given the user's consumption per month and system size,
+    estimate Solar Gen, Solar Used, and LESCO Import per month.
+    Mirrors the internal snapshot logic:
+      - Solar direct covers day-load
+      - Surplus charges battery (solar only)
+      - Battery discharges at night
+      - Grid covers remainder
+    """
+    solar_gen_monthly = solar_kwp * LAHORE_AVG_PSH * (1 - PV_SYSTEM_LOSS) * DAYS_PER_MONTH
+
+    out = history_df.copy()
+    # Ensure Bill column survives; keep Month, Consumption, Bill, then add estimates
+    if "Bill (PKR)" not in out.columns:
+        out["Bill (PKR)"] = None
+
+    gens, useds, lescos = [], [], []
+    for _, row in out.iterrows():
+        cons = _parse_num(row.get("Consumption (kWh)"))
+        if cons is None or cons <= 0:
+            gens.append(None)
+            useds.append(None)
+            lescos.append(None)
+            continue
+
+        day_load = cons * DAY_LOAD_RATIO
+        night_load = cons * (1 - DAY_LOAD_RATIO)
+
+        solar_direct = min(solar_gen_monthly, day_load)
+        surplus = max(0.0, solar_gen_monthly - solar_direct)
+        battery_charge = min(surplus, battery_kwh)
+        battery_usable = battery_charge * BATTERY_EFFICIENCY
+        battery_discharge = min(battery_usable, night_load)
+        solar_used = solar_direct + battery_discharge
+        lesco = max(0.0, cons - solar_used)
+
+        gens.append(round(solar_gen_monthly, 1))
+        useds.append(round(solar_used, 1))
+        lescos.append(round(lesco, 1))
+
+    out["Solar Gen (kWh)"] = gens
+    out["Solar Used (kWh)"] = useds
+    out["LESCO Import (kWh)"] = lescos
+    # Reorder columns
+    return out[[
+        "Month", "Consumption (kWh)", "Bill (PKR)",
+        "Solar Gen (kWh)", "Solar Used (kWh)", "LESCO Import (kWh)"
+    ]]
 
 
 # =============================================================
@@ -186,54 +250,19 @@ def _base_layout(height=380, title=None):
     return layout
 
 
-def chart_gauge(value, limit):
-    gauge_max = max(300, limit * 1.5)
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number+delta",
-        value=value,
-        number={"suffix": " units",
-                "font": {"size": 44, "color": COLORS["primary"]}},
-        delta={"reference": limit,
-               "increasing": {"color": COLORS["danger"]},
-               "decreasing": {"color": COLORS["success"]},
-               "font": {"size": 16}},
-        gauge={
-            "axis": {"range": [0, gauge_max], "tickcolor": COLORS["muted"],
-                     "tickfont": {"size": 10, "color": COLORS["muted"]}},
-            "bar": {"color": COLORS["primary"], "thickness": 0.28},
-            "bgcolor": "rgba(0,0,0,0)", "borderwidth": 0,
-            "steps": [
-                {"range": [0, limit * 0.75],     "color": "rgba(63,185,80,0.18)"},
-                {"range": [limit * 0.75, limit], "color": "rgba(210,153,34,0.22)"},
-                {"range": [limit, gauge_max],    "color": "rgba(248,81,73,0.22)"},
-            ],
-            "threshold": {"line": {"color": COLORS["danger"], "width": 3},
-                          "thickness": 0.85, "value": limit},
-        },
-    ))
-    fig.update_layout(**_base_layout(height=290))
-    return fig
-
-
-def chart_monthly_stacked(history_df):
-    df = history_df.copy()
-    df["solar_used"] = pd.to_numeric(df.get("Solar Used (kWh)"), errors="coerce")
-    df["lesco"] = pd.to_numeric(df.get("LESCO Import (kWh)"), errors="coerce")
-    df["cons"] = pd.to_numeric(df.get("Consumption (kWh)"), errors="coerce")
-
-    if df["solar_used"].isna().all() and df["lesco"].isna().all():
-        df["lesco"] = df["cons"]
-        df["solar_used"] = 0
-    df = df.fillna(0)
+def chart_monthly_stacked(enriched_df):
+    df = enriched_df.copy()
+    df["solar_used"] = pd.to_numeric(df.get("Solar Used (kWh)"), errors="coerce").fillna(0)
+    df["lesco"] = pd.to_numeric(df.get("LESCO Import (kWh)"), errors="coerce").fillna(0)
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=df["Month"], y=df["solar_used"], name="Solar Used",
+        x=df["Month"], y=df["solar_used"], name="Solar Used (est.)",
         marker=dict(color=COLORS["solar"]),
         hovertemplate="<b>%{x}</b><br>Solar Used: %{y:.0f} kWh<extra></extra>",
     ))
     fig.add_trace(go.Bar(
-        x=df["Month"], y=df["lesco"], name="LESCO Import",
+        x=df["Month"], y=df["lesco"], name="LESCO Import (est.)",
         marker=dict(color=COLORS["primary"]),
         hovertemplate="<b>%{x}</b><br>LESCO Import: %{y:.0f} kWh<extra></extra>",
     ))
@@ -244,7 +273,7 @@ def chart_monthly_stacked(history_df):
         annotation_position="top right",
         annotation_font=dict(color=COLORS["danger"], size=11),
     )
-    layout = _base_layout(height=400, title="12-Month Energy Breakdown")
+    layout = _base_layout(height=400, title="12-Month Energy Breakdown (estimated)")
     layout["barmode"] = "stack"
     layout["bargap"] = 0.35
     layout["xaxis"] = _modern_axis_style()
@@ -256,8 +285,8 @@ def chart_monthly_stacked(history_df):
     return fig
 
 
-def chart_solar_utilization(history_df):
-    df = history_df.copy()
+def chart_solar_utilization(enriched_df):
+    df = enriched_df.copy()
     df["gen"] = pd.to_numeric(df.get("Solar Gen (kWh)"), errors="coerce")
     df["used"] = pd.to_numeric(df.get("Solar Used (kWh)"), errors="coerce")
     df = df.dropna(subset=["gen", "used"], how="all").fillna(0)
@@ -266,17 +295,17 @@ def chart_solar_utilization(history_df):
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=df["Month"], y=df["gen"], name="Generated",
+        x=df["Month"], y=df["gen"], name="Generated (est.)",
         marker=dict(color="rgba(255,223,74,0.35)",
                     line=dict(color=COLORS["solar"], width=1.5)),
         hovertemplate="<b>%{x}</b><br>Generated: %{y:.0f} kWh<extra></extra>",
     ))
     fig.add_trace(go.Bar(
-        x=df["Month"], y=df["used"], name="Used On-site",
+        x=df["Month"], y=df["used"], name="Used On-site (est.)",
         marker=dict(color=COLORS["success"]),
         hovertemplate="<b>%{x}</b><br>Used: %{y:.0f} kWh<extra></extra>",
     ))
-    layout = _base_layout(height=340, title="Solar Generation vs Utilization")
+    layout = _base_layout(height=340, title="Solar Generation vs Utilization (estimated)")
     layout["barmode"] = "group"
     layout["bargap"] = 0.3
     layout["bargroupgap"] = 0.1
@@ -377,18 +406,17 @@ def chart_consumption_line(history_df, appliance_estimate):
 
 
 # =============================================================
-# LLM CALL — CONSERVATIVE AVERAGE SOLAR ESTIMATE
+# LLM CALL
 # =============================================================
-def call_llm_analysis(solar_kwp, battery_kwh, appliances_df, history_df):
+def call_llm_analysis(solar_kwp, battery_kwh, appliances_df, enriched_df):
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
         return {"error": "GROQ_API_KEY not configured in Streamlit Secrets."}
 
     appliance_table = _fmt_appliance_table(appliances_df)
-    history_table = _fmt_history_table(history_df)
+    history_table = _fmt_enriched_history_table(enriched_df)
     appliance_monthly = sum(a.monthly_kwh for a in appliances_df)
 
-    # Pre-computed conservative reference values
     ref = formula_solar_estimate(solar_kwp)
 
     system_prompt = (
@@ -399,6 +427,7 @@ def call_llm_analysis(solar_kwp, battery_kwh, appliances_df, history_df):
         "- Do NOT invent irradiance or efficiency numbers.\n"
         "- Return ONLY valid JSON matching the schema.\n"
         "- Battery is charged ONLY by solar PV. System is CAPTIVE - no export.\n"
+        "- The Solar Gen / Solar Used columns in history are app-estimated; use them as context.\n"
     )
 
     user_prompt = """
@@ -421,6 +450,7 @@ APPLIANCES
 APPLIANCE MONTHLY ESTIMATE: {appl:.0f} kWh
 
 12-MONTH HISTORY (Oct 2025 - Sep 2026)
+Columns marked * are app-estimated from system size.
 {history}
 
 REFERENCE CALCULATION (must match your output within ±5%)
@@ -717,12 +747,10 @@ if "solar_kwp" not in st.session_state:
 if "battery_kwh" not in st.session_state:
     st.session_state.battery_kwh = DEFAULT_BATTERY_KWH
 if "hist_df" not in st.session_state:
+    # SIMPLIFIED: only Month, Consumption, Bill
     st.session_state.hist_df = pd.DataFrame({
         "Month": MONTH_SEQ,
         "Consumption (kWh)": [None] * len(MONTH_SEQ),
-        "Solar Gen (kWh)":   [None] * len(MONTH_SEQ),
-        "Solar Used (kWh)":  [None] * len(MONTH_SEQ),
-        "LESCO Import (kWh)":[None] * len(MONTH_SEQ),
         "Bill (PKR)":        [None] * len(MONTH_SEQ),
     })
 if "analysis" not in st.session_state:
@@ -777,7 +805,6 @@ with st.sidebar:
     st.session_state.battery_kwh = st.slider(
         "Battery (kWh)", 0.0, 80.0, st.session_state.battery_kwh, 1.0)
 
-    # Show conservative solar preview
     _preview = formula_solar_estimate(st.session_state.solar_kwp)
     st.info(
         "**Avg estimate** (PSH 4.8, losses 20%):\n"
@@ -787,11 +814,21 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("## 📊 Monthly History")
-    st.caption("Oct 2025 → Sep 2026. Fill only what you have.")
+    st.caption(
+        "Oct 2025 → Sep 2026. Enter only Consumption (kWh) and/or Bill (PKR). "
+        "Solar Gen & Solar Used are auto-estimated by the app."
+    )
     st.session_state.hist_df = st.data_editor(
         st.session_state.hist_df,
         hide_index=True, use_container_width=True,
         num_rows="fixed", key="hist_editor",
+        column_config={
+            "Month": st.column_config.TextColumn("Month", disabled=True),
+            "Consumption (kWh)": st.column_config.NumberColumn(
+                "Consumption (kWh)", min_value=0.0, step=1.0, format="%.0f"),
+            "Bill (PKR)": st.column_config.NumberColumn(
+                "Bill (PKR)", min_value=0.0, step=10.0, format="%.0f"),
+        },
     )
 
 # =============================================================
@@ -800,7 +837,15 @@ with st.sidebar:
 appliances = [Appliance(**a) for a in st.session_state.appliances]
 appliance_monthly = sum(a.monthly_kwh for a in appliances)
 
-history_df = st.session_state.hist_df
+history_df = st.session_state.hist_df  # Month, Consumption, Bill
+
+# Enrich with app-estimated Solar Gen / Solar Used / LESCO Import
+enriched_df = estimate_monthly_flows(
+    history_df,
+    st.session_state.solar_kwp,
+    st.session_state.battery_kwh,
+)
+
 cons_list = _clean_col(history_df, "Consumption (kWh)")
 bill_list = _clean_col(history_df, "Bill (PKR)")
 avg_cons = sum(cons_list) / len(cons_list) if cons_list else appliance_monthly
@@ -889,7 +934,7 @@ with col_right:
 col_l2, col_r2 = st.columns(2)
 
 with col_l2:
-    st.plotly_chart(chart_monthly_stacked(history_df), use_container_width=True)
+    st.plotly_chart(chart_monthly_stacked(enriched_df), use_container_width=True)
 
 with col_r2:
     fig_bill = chart_bill_trend(history_df)
@@ -901,7 +946,7 @@ with col_r2:
 # =============================================================
 # SOLAR UTILIZATION
 # =============================================================
-fig_util = chart_solar_utilization(history_df)
+fig_util = chart_solar_utilization(enriched_df)
 if fig_util:
     st.plotly_chart(fig_util, use_container_width=True)
 
@@ -914,10 +959,20 @@ app_detail["% of Total"] = (app_detail["kWh/Month"] / appliance_monthly * 100).r
 st.dataframe(app_detail, hide_index=True, use_container_width=True)
 
 # =============================================================
-# HISTORY TABLE
+# HISTORY TABLE (SHOW WITH ESTIMATES — read-only view)
 # =============================================================
 st.markdown("### 📊 12-Month Data (Oct 2025 → Sep 2026)")
-st.dataframe(st.session_state.hist_df, hide_index=True, use_container_width=True)
+st.caption(
+    "Consumption & Bill are your inputs. Solar Gen, Solar Used, and LESCO Import "
+    "are auto-estimated by the app using the conservative solar constants."
+)
+view_df = enriched_df.copy()
+view_df = view_df.rename(columns={
+    "Solar Gen (kWh)":   "Solar Gen (kWh) [est.]",
+    "Solar Used (kWh)":  "Solar Used (kWh) [est.]",
+    "LESCO Import (kWh)":"LESCO Import (kWh) [est.]",
+})
+st.dataframe(view_df, hide_index=True, use_container_width=True)
 
 # =============================================================
 # LLM ANALYSIS
@@ -936,7 +991,7 @@ if st.button("🚀 Run LLM Analysis", use_container_width=True):
             solar_kwp=st.session_state.solar_kwp,
             battery_kwh=st.session_state.battery_kwh,
             appliances_df=appliances,
-            history_df=history_df,
+            enriched_df=enriched_df,
         )
 
 analysis = st.session_state.analysis
@@ -946,7 +1001,6 @@ if analysis is None:
 elif "error" in analysis:
     st.error("⚠️ " + analysis["error"])
 else:
-    # SOLAR ESTIMATE
     se = analysis.get("solar_estimate", {})
     if se:
         st.markdown("#### ☀️ Solar PV Generation Estimate (Average)")
@@ -965,7 +1019,6 @@ else:
                 unsafe_allow_html=True,
             )
 
-    # STRATEGY
     strategy = analysis.get("solar_usage_strategy", [])
     if strategy:
         st.markdown("#### 💡 Solar PV Usage Strategy")
@@ -977,7 +1030,6 @@ else:
                 unsafe_allow_html=True,
             )
 
-    # RECOMMENDATIONS
     recs = analysis.get("recommendations", {})
     if recs:
         st.markdown("#### 🎯 Top Recommendations")
@@ -1046,7 +1098,6 @@ else:
                     unsafe_allow_html=True,
                 )
 
-    # SUMMARY
     summary = analysis.get("summary")
     if summary:
         st.markdown("#### 📝 Summary")
@@ -1070,8 +1121,8 @@ st.warning(
 st.markdown("---")
 st.markdown(
     '<p style="text-align:center; color:#A0AAB5; font-size:0.8rem;">'
-    'Home Energy Manager v3.3 | Oct 2025 → Sep 2026 | '
-    'Conservative Solar Averages | Groq · openai/gpt-oss-120b'
+    'Home Energy Manager v3.4 | Oct 2025 → Sep 2026 | '
+    'Auto-Estimated Solar Flows | Groq · openai/gpt-oss-120b'
     '</p>',
     unsafe_allow_html=True,
 )
