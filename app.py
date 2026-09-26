@@ -5,7 +5,7 @@ LESCO Protected Consumer | Captive Solar (No Export) | Sep 2026
 Data window: Oct 2025 -> Sep 2026 (12 months)
 Modern graphics. High-contrast theme.
 Solar estimates use CONSERVATIVE AVERAGE values (not peak).
-User provides only Consumption + Bill; Solar Gen/Used are auto-estimated.
+User selects data source: Appliances, Monthly History, or Both.
 """
 import os
 import json
@@ -60,11 +60,11 @@ COLORS = {
 # =============================================================
 # CONSERVATIVE SOLAR CONSTANTS
 # =============================================================
-LAHORE_AVG_PSH = 4.8        # annual average peak sun hours (not summer peak)
-PV_SYSTEM_LOSS = 0.20       # 20% system losses (inverter, wiring, soiling)
+LAHORE_AVG_PSH = 4.8
+PV_SYSTEM_LOSS = 0.20
 DAYS_PER_MONTH = 30
-DAY_LOAD_RATIO = 0.55       # share of daily load during solar hours
-BATTERY_EFFICIENCY = 0.85   # round-trip LiFePO4
+DAY_LOAD_RATIO = 0.55
+BATTERY_EFFICIENCY = 0.85
 
 DEFAULT_APPLIANCES = [
     {"name": "Inverter AC 1.5T @26C (2x/week, 6h)", "watts": 550,  "hours": 6.0,  "days_per_week": 2, "qty": 1},
@@ -122,7 +122,6 @@ def _fmt_appliance_table(appliances):
 
 
 def _fmt_enriched_history_table(enriched_df):
-    """Format the enriched history (with app-estimated Solar Gen/Used) for the LLM."""
     lines = ["Month | Consumption | Bill | Solar Gen* | Solar Used* | LESCO Import*"]
     has = False
     for _, row in enriched_df.iterrows():
@@ -149,10 +148,6 @@ def _fmt_enriched_history_table(enriched_df):
 
 
 def formula_solar_estimate(kwp):
-    """
-    Deterministic, conservative average solar estimate for Lahore.
-    Used as ground truth passed to LLM. Ensures consistent, moderate output.
-    """
     daily = kwp * LAHORE_AVG_PSH * (1 - PV_SYSTEM_LOSS)
     monthly = daily * DAYS_PER_MONTH
     annual = monthly * 12
@@ -164,19 +159,8 @@ def formula_solar_estimate(kwp):
 
 
 def estimate_monthly_flows(history_df, solar_kwp, battery_kwh):
-    """
-    Given the user's consumption per month and system size,
-    estimate Solar Gen, Solar Used, and LESCO Import per month.
-    Mirrors the internal snapshot logic:
-      - Solar direct covers day-load
-      - Surplus charges battery (solar only)
-      - Battery discharges at night
-      - Grid covers remainder
-    """
     solar_gen_monthly = solar_kwp * LAHORE_AVG_PSH * (1 - PV_SYSTEM_LOSS) * DAYS_PER_MONTH
-
     out = history_df.copy()
-    # Ensure Bill column survives; keep Month, Consumption, Bill, then add estimates
     if "Bill (PKR)" not in out.columns:
         out["Bill (PKR)"] = None
 
@@ -184,14 +168,9 @@ def estimate_monthly_flows(history_df, solar_kwp, battery_kwh):
     for _, row in out.iterrows():
         cons = _parse_num(row.get("Consumption (kWh)"))
         if cons is None or cons <= 0:
-            gens.append(None)
-            useds.append(None)
-            lescos.append(None)
-            continue
-
+            gens.append(None); useds.append(None); lescos.append(None); continue
         day_load = cons * DAY_LOAD_RATIO
         night_load = cons * (1 - DAY_LOAD_RATIO)
-
         solar_direct = min(solar_gen_monthly, day_load)
         surplus = max(0.0, solar_gen_monthly - solar_direct)
         battery_charge = min(surplus, battery_kwh)
@@ -199,7 +178,6 @@ def estimate_monthly_flows(history_df, solar_kwp, battery_kwh):
         battery_discharge = min(battery_usable, night_load)
         solar_used = solar_direct + battery_discharge
         lesco = max(0.0, cons - solar_used)
-
         gens.append(round(solar_gen_monthly, 1))
         useds.append(round(solar_used, 1))
         lescos.append(round(lesco, 1))
@@ -207,7 +185,6 @@ def estimate_monthly_flows(history_df, solar_kwp, battery_kwh):
     out["Solar Gen (kWh)"] = gens
     out["Solar Used (kWh)"] = useds
     out["LESCO Import (kWh)"] = lescos
-    # Reorder columns
     return out[[
         "Month", "Consumption (kWh)", "Bill (PKR)",
         "Solar Gen (kWh)", "Solar Used (kWh)", "LESCO Import (kWh)"
@@ -346,11 +323,9 @@ def chart_bill_trend(history_df):
 def chart_appliance_modern(app_df):
     labels = app_df["Appliance"].tolist()
     values = app_df["kWh/Month"].tolist()
-
     palette = [
         "#58A6FF", "#3FB950", "#FFDF4A", "#F85149", "#D29922",
-        "#A371F7", "#39D353", "#FF7B72", "#79C0FF", "#F0883E",
-        "#7EE787",
+        "#A371F7", "#39D353", "#FF7B72", "#79C0FF", "#F0883E", "#7EE787",
     ]
     fig = go.Figure(go.Pie(
         labels=labels, values=values, hole=0.58,
@@ -406,9 +381,9 @@ def chart_consumption_line(history_df, appliance_estimate):
 
 
 # =============================================================
-# LLM CALL
+# LLM CALL — with data source mode
 # =============================================================
-def call_llm_analysis(solar_kwp, battery_kwh, appliances_df, enriched_df):
+def call_llm_analysis(solar_kwp, battery_kwh, appliances_df, enriched_df, data_source):
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
         return {"error": "GROQ_API_KEY not configured in Streamlit Secrets."}
@@ -419,6 +394,33 @@ def call_llm_analysis(solar_kwp, battery_kwh, appliances_df, enriched_df):
 
     ref = formula_solar_estimate(solar_kwp)
 
+    # Mode-specific instructions
+    if data_source == "appliances":
+        mode_instruction = (
+            "DATA SOURCE MODE: APPLIANCES ONLY\n"
+            "Use the APPLIANCE TABLE as the ONLY authoritative load estimate.\n"
+            "Treat the 12-month history as background context only — do NOT base\n"
+            "recommendations primarily on it. All increase-solar / increase-battery\n"
+            "decisions must derive from the appliance-based monthly estimate."
+        )
+    elif data_source == "history":
+        mode_instruction = (
+            "DATA SOURCE MODE: MONTHLY HISTORY ONLY\n"
+            "Use the 12-MONTH HISTORY as the ONLY authoritative load estimate.\n"
+            "Treat the APPLIANCE TABLE as background context only — do NOT base\n"
+            "recommendations primarily on it. All increase-solar / increase-battery\n"
+            "decisions must derive from the metered consumption + bill history."
+        )
+    else:  # both
+        mode_instruction = (
+            "DATA SOURCE MODE: BOTH (cross-check)\n"
+            "Cross-check the APPLIANCE TABLE against the 12-MONTH HISTORY.\n"
+            "If appliance monthly estimate and metered history differ by >20%,\n"
+            "explicitly note the discrepancy in your reasoning and prioritize the\n"
+            "metered history as ground truth for load, using appliances to explain\n"
+            "the composition."
+        )
+
     system_prompt = (
         "You are a senior solar energy engineer for Lahore, Pakistan.\n"
         "STRICT RULES:\n"
@@ -427,7 +429,7 @@ def call_llm_analysis(solar_kwp, battery_kwh, appliances_df, enriched_df):
         "- Do NOT invent irradiance or efficiency numbers.\n"
         "- Return ONLY valid JSON matching the schema.\n"
         "- Battery is charged ONLY by solar PV. System is CAPTIVE - no export.\n"
-        "- The Solar Gen / Solar Used columns in history are app-estimated; use them as context.\n"
+        "- Respect the DATA SOURCE MODE instruction exactly.\n"
     )
 
     user_prompt = """
@@ -443,6 +445,8 @@ SYSTEM
 - Battery: solar-PV charged only
 - LESCO protected limit: 200 kWh/month
 - Solar: {solar_kwp} kWp | Battery: {battery_kwh} kWh
+
+{mode_instruction}
 
 APPLIANCES
 {table}
@@ -471,7 +475,7 @@ TASKS
    c. 2nd LESCO METER? (Recommended/Not recommended/Consider + legal warning)
    d. LOAD OPTIMIZATION (3-5 specific actions)
 
-4. SHORT SUMMARY (2-3 sentences).
+4. SHORT SUMMARY (2-3 sentences) that notes which data source was used.
 
 Return ONLY this JSON:
 {{
@@ -490,6 +494,7 @@ Return ONLY this JSON:
 }}
 """.format(
         solar_kwp=solar_kwp, battery_kwh=battery_kwh,
+        mode_instruction=mode_instruction,
         table=appliance_table, appl=appliance_monthly, history=history_table,
         ref_daily=ref["daily_kwh"], ref_monthly=ref["monthly_kwh"],
         ref_annual=ref["annual_kwh"],
@@ -511,7 +516,7 @@ Return ONLY this JSON:
         r.raise_for_status()
         result = json.loads(r.json()["choices"][0]["message"]["content"])
 
-        # Safety net: if LLM deviates >15% from the formula, override with formula
+        # Safety net on solar estimate
         se = result.get("solar_estimate", {})
         llm_monthly = se.get("monthly_kwh", 0) or 0
         ref_monthly = ref["monthly_kwh"]
@@ -652,6 +657,17 @@ st.markdown("""
         color: #FFDF4A !important; margin: 0.5rem 0;
     }
 
+    .mode-banner {
+        background: linear-gradient(135deg, rgba(88,166,255,0.15), rgba(88,166,255,0.04));
+        border: 1px solid rgba(88,166,255,0.5);
+        border-radius: 10px;
+        padding: 0.7rem 1rem;
+        font-size: 0.88rem;
+        color: #58A6FF !important;
+        margin: 0.5rem 0 1rem 0;
+    }
+    .mode-banner b { color: #A9D1FF !important; }
+
     div[data-testid="stAlert"] { border-radius: 10px; padding: 0.9rem 1.1rem; }
     div[data-testid="stAlert"] * { color: inherit !important; }
     .stAlert p { color: #F0F6FC !important; }
@@ -732,6 +748,19 @@ st.markdown("""
         padding: 2px 6px; border-radius: 4px;
     }
 
+    /* Radio button group (segmented control style) */
+    div[data-testid="stRadio"] > label {
+        color: #F0F6FC !important;
+        font-weight: 700 !important;
+        font-size: 0.85rem !important;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    div[data-testid="stRadio"] label {
+        color: #F0F6FC !important;
+        font-weight: 600;
+    }
+
     div[data-testid="stSpinner"] * { color: #F0F6FC !important; }
     hr { border-color: #30363D !important; margin: 1.5rem 0; }
 </style>
@@ -747,7 +776,6 @@ if "solar_kwp" not in st.session_state:
 if "battery_kwh" not in st.session_state:
     st.session_state.battery_kwh = DEFAULT_BATTERY_KWH
 if "hist_df" not in st.session_state:
-    # SIMPLIFIED: only Month, Consumption, Bill
     st.session_state.hist_df = pd.DataFrame({
         "Month": MONTH_SEQ,
         "Consumption (kWh)": [None] * len(MONTH_SEQ),
@@ -755,13 +783,63 @@ if "hist_df" not in st.session_state:
     })
 if "analysis" not in st.session_state:
     st.session_state.analysis = None
+if "data_source" not in st.session_state:
+    st.session_state.data_source = "both"
 
 # =============================================================
 # SIDEBAR
 # =============================================================
 with st.sidebar:
-    st.markdown("## 🔌 Appliances")
-    st.caption("All fields editable. Days/week = 7 for daily use.")
+    # =========================================
+    # DATA SOURCE SELECTOR (NEW)
+    # =========================================
+    st.markdown("## 🎛️ Data Source")
+    st.caption(
+        "Choose which input(s) the LLM uses for the analysis."
+    )
+    _mode_options = ["📱 Appliances", "📊 Monthly History", "🔀 Both (recommended)"]
+    _mode_map = {
+        "📱 Appliances": "appliances",
+        "📊 Monthly History": "history",
+        "🔀 Both (recommended)": "both",
+    }
+    _default_label = "🔀 Both (recommended)"
+    for _k, _v in _mode_map.items():
+        if _v == st.session_state.data_source:
+            _default_label = _k
+            break
+
+    _selected_label = st.radio(
+        "Analysis basis",
+        _mode_options,
+        index=_mode_options.index(_default_label),
+        key="data_source_radio",
+        label_visibility="collapsed",
+    )
+    st.session_state.data_source = _mode_map[_selected_label]
+
+    _mode_descr = {
+        "appliances": "Analysis based on **appliance inputs only**.",
+        "history":    "Analysis based on **12-month metered history only**.",
+        "both":       "Analysis cross-checks **appliances + history**.",
+    }
+    st.markdown(
+        '<div class="mode-banner">🎯 {}'.format(_mode_descr[st.session_state.data_source]),
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("---")
+
+    # =========================================
+    # APPLIANCES SECTION
+    # =========================================
+    _active_app = st.session_state.data_source in ("appliances", "both")
+    _app_title = "## 🔌 Appliances" + (" ✅" if _active_app else " ⚪")
+    st.markdown(_app_title)
+    if not _active_app:
+        st.caption("⚪ Not used in current mode")
+    else:
+        st.caption("✅ Active · All fields editable. Days/week = 7 for daily use.")
 
     with st.expander("➕ Add Appliance", expanded=False):
         n = st.text_input("Name", key="nn")
@@ -794,6 +872,10 @@ with st.sidebar:
                 st.rerun()
 
     st.markdown("---")
+
+    # =========================================
+    # SOLAR & BATTERY
+    # =========================================
     st.markdown("## ☀️ Solar & Battery")
     st.markdown(
         '<div class="captive-note">🔒 Captive system — no export. '
@@ -813,11 +895,21 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.markdown("## 📊 Monthly History")
-    st.caption(
-        "Oct 2025 → Sep 2026. Enter only Consumption (kWh) and/or Bill (PKR). "
-        "Solar Gen & Solar Used are auto-estimated by the app."
-    )
+
+    # =========================================
+    # MONTHLY HISTORY SECTION
+    # =========================================
+    _active_hist = st.session_state.data_source in ("history", "both")
+    _hist_title = "## 📊 Monthly History" + (" ✅" if _active_hist else " ⚪")
+    st.markdown(_hist_title)
+    if not _active_hist:
+        st.caption("⚪ Not used in current mode")
+    else:
+        st.caption(
+            "✅ Active · Oct 2025 → Sep 2026. Enter only Consumption (kWh) and/or "
+            "Bill (PKR). Solar Gen & Solar Used are auto-estimated by the app."
+        )
+
     st.session_state.hist_df = st.data_editor(
         st.session_state.hist_df,
         hide_index=True, use_container_width=True,
@@ -837,9 +929,8 @@ with st.sidebar:
 appliances = [Appliance(**a) for a in st.session_state.appliances]
 appliance_monthly = sum(a.monthly_kwh for a in appliances)
 
-history_df = st.session_state.hist_df  # Month, Consumption, Bill
+history_df = st.session_state.hist_df
 
-# Enrich with app-estimated Solar Gen / Solar Used / LESCO Import
 enriched_df = estimate_monthly_flows(
     history_df,
     st.session_state.solar_kwp,
@@ -859,6 +950,19 @@ st.markdown(
     "<p style='text-align:center; color:#B0BAC5;'>"
     "September 2026 | LESCO Protected Consumer | "
     "Captive Solar (No Export) | Conservative Average Estimates</p>",
+    unsafe_allow_html=True,
+)
+
+# Mode banner
+_mode_labels = {
+    "appliances": "📱 Appliances-based analysis",
+    "history":    "📊 Monthly-history-based analysis",
+    "both":       "🔀 Combined analysis (appliances + history)",
+}
+st.markdown(
+    '<div class="mode-banner">'
+    '🎯 Current mode: <b>{}</b> — change in the sidebar'
+    '</div>'.format(_mode_labels[st.session_state.data_source]),
     unsafe_allow_html=True,
 )
 st.markdown("---")
@@ -899,8 +1003,9 @@ with sc2:
         '<b>Protected limit:</b> 200 kWh/month<br>'
         '<b>Months of history:</b> {}<br>'
         '<b>Appliances tracked:</b> {}<br>'
-        '<b>Solar estimate constants:</b> PSH 4.8 · losses 20%'
-        '</div>'.format(len(cons_list), len(appliances)),
+        '<b>Analysis mode:</b> {}'
+        '</div>'.format(len(cons_list), len(appliances),
+                        _mode_labels[st.session_state.data_source]),
         unsafe_allow_html=True,
     )
 
@@ -959,7 +1064,7 @@ app_detail["% of Total"] = (app_detail["kWh/Month"] / appliance_monthly * 100).r
 st.dataframe(app_detail, hide_index=True, use_container_width=True)
 
 # =============================================================
-# HISTORY TABLE (SHOW WITH ESTIMATES — read-only view)
+# HISTORY TABLE
 # =============================================================
 st.markdown("### 📊 12-Month Data (Oct 2025 → Sep 2026)")
 st.caption(
@@ -980,9 +1085,8 @@ st.dataframe(view_df, hide_index=True, use_container_width=True)
 st.markdown("---")
 st.markdown("### 🤖 LLM Analysis (Groq · gpt-oss-120b)")
 st.caption(
-    "Solar generation uses conservative average constants "
-    "(PSH 4.8, losses 20%). Results are validated against a formula "
-    "to prevent high or low outliers."
+    "Uses mode: **{}** · Solar generation uses conservative average constants "
+    "(PSH 4.8, losses 20%).".format(_mode_labels[st.session_state.data_source])
 )
 
 if st.button("🚀 Run LLM Analysis", use_container_width=True):
@@ -992,6 +1096,7 @@ if st.button("🚀 Run LLM Analysis", use_container_width=True):
             battery_kwh=st.session_state.battery_kwh,
             appliances_df=appliances,
             enriched_df=enriched_df,
+            data_source=st.session_state.data_source,
         )
 
 analysis = st.session_state.analysis
@@ -1121,8 +1226,8 @@ st.warning(
 st.markdown("---")
 st.markdown(
     '<p style="text-align:center; color:#A0AAB5; font-size:0.8rem;">'
-    'Home Energy Manager v3.4 | Oct 2025 → Sep 2026 | '
-    'Auto-Estimated Solar Flows | Groq · openai/gpt-oss-120b'
+    'Home Energy Manager v3.5 | Oct 2025 → Sep 2026 | '
+    'Selectable Data Source | Groq · openai/gpt-oss-120b'
     '</p>',
     unsafe_allow_html=True,
 )
